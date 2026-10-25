@@ -10,7 +10,7 @@ import { createFabricSource } from './live';
 import { parseRecord } from './parse';
 import { submitRequest, type RequestKey } from './requests';
 import type { CreateFields, FabricSource } from './source';
-import { findByTaskPath, loadRegistry } from './view';
+import { findByTaskPath, loadRegistry, samePath } from './view';
 import { submitAnswer } from './write';
 import type { RegistryEntry } from './agents';
 
@@ -50,6 +50,10 @@ export class FabricStore {
   home = $state<string | null>(null);
   workerRoot = $state<string | null>(null);
   openedRoots = $state<string[]>([]);
+  // Records discovered on disk that failed to parse, keyed by absolute path -> parse error.
+  // A notice may point at one of these: the file IS on disk, it just could not be read, which
+  // is a different (and recoverable) situation than a genuinely missing record.
+  unreadable = $state<Map<string, string>>(new Map());
 
   #source: FabricSource | null = null;
   #timer: ReturnType<typeof setInterval> | null = null;
@@ -156,12 +160,18 @@ export class FabricStore {
     if (!src) return;
     const ok: Held[] = [];
     const bad: string[] = [];
+    const unreadable = new Map<string, string>();
     for (const { path, text } of await src.listRecords()) {
       try { ok.push({ path, record: parseRecord(text), text }); }
-      catch (e) { bad.push(`${folderName(folderOf(path))}: ${(e as Error).message}`); }
+      catch (e) {
+        const reason = (e as Error).message;
+        bad.push(`${folderName(folderOf(path))}: ${reason}`);
+        unreadable.set(path, reason);
+      }
     }
     this.records = ok;
     this.errors = bad;
+    this.unreadable = unreadable;
     this.registry = loadRegistry(await src.listRegistry()).entries;
     this.events = parseEvents(await src.readEvents());
     this.readPosition = reconcileReadPosition(this.#eventsKey, this.readPosition, this.events.length);
@@ -196,6 +206,16 @@ export class FabricStore {
 
   locate(taskPath: string): Held | undefined {
     return findByTaskPath(this.records, taskPath);
+  }
+
+  // The parse error for a record that IS on disk but failed to load, or null when the path is
+  // not among the unreadable records. Lets a notice distinguish "exists but unreadable" from
+  // "genuinely missing" so the user gets an accurate, recoverable message.
+  unreadableReason(taskPath: string): string | null {
+    for (const [path, reason] of this.unreadable) {
+      if (samePath(path, taskPath)) return reason;
+    }
+    return null;
   }
 
   open(path: string | null): void {

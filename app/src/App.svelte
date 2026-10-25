@@ -95,8 +95,12 @@
     // `locate` is redelegation/path-form aware (view.ts findByTaskPath): `held` is the live target.
     const held = fabric?.locate(taskPath);
     if (!held) {
-      // Genuine not-on-disk: a recoverable explanation with a next step, never a silent dead-end.
-      noticeError = `No record on disk for ${taskPath}. Try rescanning or check the folder.`;
+      // Distinguish a record that is on disk but failed to parse (recoverable: fix the file)
+      // from one that is genuinely missing — both are recoverable, never a silent dead-end.
+      const reason = fabric?.unreadableReason(taskPath);
+      noticeError = reason
+        ? `This record is on disk but could not be read (${reason}). Fix the file, then rescan.`
+        : `No record on disk for ${taskPath}. Try rescanning or check the folder.`;
       return;
     }
     const folder = folderOf(held.path);

@@ -67,3 +67,10 @@ export function findByTaskPath<T extends Resolvable>(held: T[], taskPath: string
   if (!resolved) return undefined;
   return followRedelegation(held, resolved);
 }
+
+// Whether two task paths denote the same record, using the same tolerance findByTaskPath
+// applies (exact, then slash-normalized, then basename id). Lets callers correlate a notice's
+// taskPath with an entry keyed by its on-disk path without re-implementing normalization.
+export function samePath(a: string, b: string): boolean {
+  return a === b || normPath(a) === normPath(b) || (base(a) !== '' && base(a) === base(b));
+}
