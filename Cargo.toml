@@ -4,7 +4,7 @@ members = ["crates/fabr-core", "crates/fabr", "crates/fabr-agent", "app/src-taur
 default-members = ["crates/fabr-core", "crates/fabr"]
 
 [workspace.package]
-version = "0.2.7"
+version = "0.2.8"
 edition = "2024"
 rust-version = "1.90"
 license = "GPL-3.0-only"

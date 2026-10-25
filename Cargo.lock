@@ -1216,7 +1216,7 @@ dependencies = [
 
 [[package]]
 name = "fabr"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "clap",
  "fabr-agent",
@@ -1231,7 +1231,7 @@ dependencies = [
 
 [[package]]
 name = "fabr-agent"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "chrono",
  "fabr-core",
@@ -1248,7 +1248,7 @@ dependencies = [
 
 [[package]]
 name = "fabr-core"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1271,7 +1271,7 @@ dependencies = [
 
 [[package]]
 name = "fabr-desktop"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "fabr-agent",
  "fabr-core",
