@@ -2,7 +2,6 @@ use crate::link::{is_terminal, list_records, load_record, update_record};
 use crate::model::Model;
 use crate::now_utc;
 use crate::tools;
-use crate::tools_contract::{self, LocalPrep};
 use crate::verify::{self, CheckOutcome};
 use fabr_core::taskrec::{
     Approval, Assertion, Check, PlanMeta, Question, State, Step, TaskRecord, Verdict, VerdictItem, approval_digest, registry_filename,
@@ -35,7 +34,7 @@ fn unsupported_tools(rec: &TaskRecord) -> Result<(), FabrError> {
         return Ok(());
     };
     for tool in &meta.tools {
-        if !tools_contract::allowed_in_plan(tool) {
+        if !matches!(tool.as_str(), "read_file" | "write_file" | "list_dir") {
             return Err(FabrError::BadRequest(format!("unsupported tool {tool}")));
         }
     }
@@ -107,7 +106,7 @@ pub fn advance(
         }
         State::Task => match rec.step {
             Some(Step::Define) => define_stage(record_path, &mut rec, &expected, model),
-            Some(Step::Plan) => plan_stage(ws, source, node_path, record_path, fabric_space, &mut rec, &expected, model, false),
+            Some(Step::Plan) => plan_stage(ws, source, node_path, record_path, &mut rec, &expected, model, false),
             _ => gather_stage(node_dir, record_path, &mut rec, &expected),
         },
         State::Defined => {
@@ -122,7 +121,7 @@ pub fn advance(
                     Some(n) => append_log(&mut rec.log, "approve", &format!("refused: {n}")),
                     None => append_log(&mut rec.log, "approve", "refused"),
                 }
-                return plan_stage(ws, source, node_path, record_path, fabric_space, &mut rec, &expected, model, true);
+                return plan_stage(ws, source, node_path, record_path, &mut rec, &expected, model, true);
             }
             if status != "approved" {
                 return Ok(());
@@ -318,16 +317,13 @@ fn plan_stage(
     source: &str,
     node_path: &str,
     record_path: &Path,
-    fabric_space: &Path,
     rec: &mut TaskRecord,
     expected: &str,
     model: &impl Model,
     refused: bool,
 ) -> Result<(), FabrError> {
     let note = if refused { rec.approval.as_ref().and_then(|a| a.note.clone()) } else { None };
-    let keys = tools_contract::load_sponsor_keys(fabric_space);
-    let names = tools_contract::plan_tool_names(&keys);
-    let draft = model.plan_with_tools(&names, &rec.title, &rec.spec, &rec.success, note.as_deref())?;
+    let draft = model.plan(&rec.title, &rec.spec, &rec.success, note.as_deref())?;
     if draft.plan.trim().is_empty() || draft.checks.is_empty() {
         return Err(FabrError::BadRequest("plan is incomplete".into()));
     }
@@ -346,7 +342,6 @@ fn plan_stage(
         tools: draft.tools,
         assumptions: Vec::new(),
         checks: draft.checks.into_iter().map(|c| Check { cmd: c.cmd, args: c.args }).collect(),
-        bound_actions: Vec::new(),
     });
     let digest = approval_digest(rec);
     rec.approval = Some(Approval { status: "pending".into(), by: None, at: None, note: None, digest: Some(digest) });
@@ -388,31 +383,20 @@ fn execute_stage(
     // reversible. Otherwise — an irreversible plan, or any non-`write_file`
     // action already applied — we must not auto-replay; route to Evaluate so the
     // checks run and surface a verdict / needs-human instead.
-    let mut expected = expected.to_string();
-    if let Some(msg) = tools_contract::unresolved_external_message(&rec.log) {
-        append_log(&mut rec.log, "execute", &msg);
-        expected = persist(record_path, rec, &expected)?;
-    }
     if execute_interrupted(&rec.log) && !safe_to_replay(rec) {
         rec.step = Some(Step::Evaluate);
         rec.verdict = None;
         append_log(&mut rec.log, "execute", "interrupted execute with uncertain outcome; routing to evaluate instead of replaying");
-        persist(record_path, rec, &expected)?;
+        persist(record_path, rec, expected)?;
         return Ok(());
     }
-    let keys = tools_contract::load_sponsor_keys(fabric_space);
-    let approved = rec.plan_meta.as_ref().map(|m| m.tools.clone()).unwrap_or_default();
-    let callable = tools_contract::model_callable(&keys, &rec.grants.granted, &approved);
-    let advertised = tools_contract::to_advertised(&callable);
-    let calls = model.execute_advertised(&rec.title, &rec.spec, &rec.plan, &advertised)?;
+    let calls = model.execute(&rec.title, &rec.spec, &rec.plan)?;
+    let mut expected = expected.to_string();
     for call in calls {
-        if !callable.iter().any(|tool| tool.name == call.name) {
-            return Err(FabrError::BadRequest(format!("unsupported tool {}", call.name)));
-        }
-        if tools_contract::prepare_local(node_dir, &rec.log, &call, &keys)? == LocalPrep::Skip {
+        if call.name == "write_file" && log_has_write(&rec.log, &call.path) {
             continue;
         }
-        let message = apply_tool(node_dir, fabric_space, &rec.id, &call)?;
+        let message = apply_tool(node_dir, &call)?;
         append_log(&mut rec.log, "execute", &message);
         expected = persist(record_path, rec, &expected)?;
         write_registry(fabric_space, node_dir, record_path, rec, heartbeat_interval_s)?;
@@ -483,69 +467,27 @@ fn assertion_evidence(node_dir: &Path, text: &str, outcome: Option<&CheckOutcome
     }
 }
 
-fn apply_tool(node_dir: &Path, fabric_space: &Path, task_id: &str, call: &crate::model::ToolCall) -> Result<String, FabrError> {
-    let params = tools_contract::call_params(call);
+fn apply_tool(node_dir: &Path, call: &crate::model::ToolCall) -> Result<String, FabrError> {
     match call.name.as_str() {
         "read_file" => {
             let text = tools::read_file(node_dir, &call.path)?;
             Ok(format!("read_file {} ({} bytes)", call.path, text.len()))
         }
         "write_file" => {
-            let path = param_str(&params, "path").unwrap_or(call.path.as_str());
-            let content = param_str(&params, "content").or(call.content.as_deref()).unwrap_or("");
-            tools::write_file(node_dir, path, content)?;
-            let body = tools::read_file(node_dir, path)?;
-            if body != content {
-                return Err(FabrError::BadRequest(format!("write_file {path} could not be verified")));
-            }
-            Ok(format!("write_file {path}"))
+            tools::write_file(node_dir, &call.path, call.content.as_deref().unwrap_or(""))?;
+            Ok(format!("write_file {}", call.path))
         }
         "list_dir" => {
             let names = tools::list_dir(node_dir, &call.path)?;
             Ok(format!("list_dir {} ({})", call.path, names.len()))
         }
-        "recall_preferences" => {
-            let query = param_str(&params, "query").unwrap_or("");
-            let memories = crate::connectors::memory::recall(fabric_space, query)?;
-            Ok(crate::connectors::memory::recall_log(&memories))
-        }
-        "propose_memory" => {
-            let text = param_str(&params, "text").ok_or_else(|| FabrError::BadRequest("missing param text".into()))?;
-            let source = param_str(&params, "source").unwrap_or("explicit");
-            let scope = param_str(&params, "scope").unwrap_or("always");
-            let memory = crate::connectors::memory::propose(fabric_space, text, source, scope, task_id)?;
-            Ok(format!("propose_memory {} proposed", memory.id))
-        }
-        "confirm_memory" => {
-            let id = param_str(&params, "id").ok_or_else(|| FabrError::BadRequest("missing param id".into()))?;
-            let memory = crate::connectors::memory::confirm(fabric_space, id, task_id)?;
-            Ok(format!("confirm_memory {} confirmed", memory.id))
-        }
-        "delete_memory" => {
-            let id = param_str(&params, "id").ok_or_else(|| FabrError::BadRequest("missing param id".into()))?;
-            let memory = crate::connectors::memory::delete(fabric_space, id)?;
-            Ok(format!("delete_memory {} deleted", memory.id))
-        }
-        "bright_data_search" | "bright_data_extract" => {
-            let report = crate::connectors::brightdata::retrieve(fabric_space, call.name.as_str(), &params)?;
-            let section = report.markdown();
-            let body = match tools::read_file(node_dir, "research.md") {
-                Ok(existing) if existing.starts_with("source: bright_data") => format!("{existing}\n---\n{section}"),
-                _ => section,
-            };
-            tools::write_file(node_dir, "research.md", &body)?;
-            let written = tools::read_file(node_dir, "research.md")?;
-            if written != body {
-                return Err(FabrError::BadRequest("research.md could not be verified".into()));
-            }
-            Ok(report.log_line())
-        }
         other => Err(FabrError::BadRequest(format!("unknown tool {other}"))),
     }
 }
 
-fn param_str<'a>(params: &'a serde_json::Value, key: &str) -> Option<&'a str> {
-    params.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+fn log_has_write(log: &str, path: &str) -> bool {
+    let needle = format!("execute: write_file {path}");
+    log.lines().any(|line| line.contains(&needle))
 }
 
 /// Whether the persisted log shows an Execute that was started and applied at
@@ -572,16 +514,7 @@ fn execute_interrupted(log: &str) -> bool {
 /// Whether an action logged under `execute:` represents a tool that mutated or
 /// read the workspace (as opposed to bookkeeping lines like `started`).
 fn is_tool_action(action: &str) -> bool {
-    action.starts_with("write_file ")
-        || action.starts_with("read_file ")
-        || action.starts_with("list_dir ")
-        || action.starts_with("recall_preferences ")
-        || action.starts_with("propose_memory ")
-        || action.starts_with("confirm_memory ")
-        || action.starts_with("delete_memory ")
-        || action.starts_with("bright_data_search ")
-        || action.starts_with("bright_data_extract ")
-        || tools_contract::is_external_action(action)
+    action.starts_with("write_file ") || action.starts_with("read_file ") || action.starts_with("list_dir ")
 }
 
 /// Whether an interrupted execute is safe to replay. Replay is only safe when
