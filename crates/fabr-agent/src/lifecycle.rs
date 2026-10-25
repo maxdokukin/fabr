@@ -2,6 +2,7 @@ use crate::link::{is_terminal, list_records, load_record, update_record};
 use crate::model::Model;
 use crate::now_utc;
 use crate::tools;
+use crate::tools_contract::{self, LocalPrep};
 use crate::verify::{self, CheckOutcome};
 use fabr_core::taskrec::{
     Approval, Assertion, Check, PlanMeta, Question, State, Step, TaskRecord, Verdict, VerdictItem, approval_digest, registry_filename,
@@ -34,7 +35,7 @@ fn unsupported_tools(rec: &TaskRecord) -> Result<(), FabrError> {
         return Ok(());
     };
     for tool in &meta.tools {
-        if !matches!(tool.as_str(), "read_file" | "write_file" | "list_dir") {
+        if !tools_contract::allowed_in_plan(tool) {
             return Err(FabrError::BadRequest(format!("unsupported tool {tool}")));
         }
     }
@@ -106,7 +107,7 @@ pub fn advance(
         }
         State::Task => match rec.step {
             Some(Step::Define) => define_stage(record_path, &mut rec, &expected, model),
-            Some(Step::Plan) => plan_stage(ws, source, node_path, record_path, &mut rec, &expected, model, false),
+            Some(Step::Plan) => plan_stage(ws, source, node_path, record_path, fabric_space, &mut rec, &expected, model, false),
             _ => gather_stage(node_dir, record_path, &mut rec, &expected),
         },
         State::Defined => {
@@ -121,7 +122,7 @@ pub fn advance(
                     Some(n) => append_log(&mut rec.log, "approve", &format!("refused: {n}")),
                     None => append_log(&mut rec.log, "approve", "refused"),
                 }
-                return plan_stage(ws, source, node_path, record_path, &mut rec, &expected, model, true);
+                return plan_stage(ws, source, node_path, record_path, fabric_space, &mut rec, &expected, model, true);
             }
             if status != "approved" {
                 return Ok(());
@@ -230,16 +231,55 @@ fn append_gathered(context: &mut String, bundle: &str) {
     context.push_str(bundle);
 }
 
+/// How many clarifying questions the definer may ask before it must proceed on
+/// what it has. Bounds the define loop so a model that keeps asking can never
+/// strand a task forever (it is a backstop; the primary fix is feeding prior
+/// answers back into `define` so the model stops needing to re-ask).
+const MAX_DEFINE_QUESTIONS: usize = 5;
+
+/// A transcript of the questions already asked and answered for this record, so
+/// the definer sees what the user has told it. Without this, `define` is called
+/// with only the (often empty) gathered context and re-asks the same question
+/// every cycle — an infinite ask/answer loop. Each answered question lives in
+/// `rec.answers`; we render its text and the answer value the user gave.
+fn answered_qa(rec: &TaskRecord) -> String {
+    if rec.answers.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n### Answered questions\n");
+    for q in &rec.answers {
+        let value = q.answer.as_ref().and_then(|a| a.value.as_deref()).unwrap_or("").trim();
+        if value.is_empty() {
+            continue;
+        }
+        let _ = writeln!(out, "Q: {}\nA: {}", q.text.trim(), value);
+    }
+    out
+}
+
 fn define_stage(record_path: &Path, rec: &mut TaskRecord, expected: &str, model: &impl Model) -> Result<(), FabrError> {
     if rec.waiting && rec.question.as_ref().is_some_and(|q| q.answer.is_none()) {
         return Ok(());
     }
-    let draft = model.define(&rec.title, &rec.context)?;
-    if let Some(text) = draft.question.filter(|q| !q.trim().is_empty()) {
+    // Feed any prior Q&A back to the definer so it sees what the user already
+    // told it; otherwise it re-asks the same question forever (the context the
+    // model is handed is title + gathered context, which does not include the
+    // answers folded into `rec.answers`).
+    let qa = answered_qa(rec);
+    let context = if qa.is_empty() { rec.context.clone() } else { format!("{}{}", rec.context, qa) };
+    let draft = model.define(&rec.title, &context)?;
+    // Backstop against an unbounded define loop: once the user has answered the
+    // budget of questions, stop asking. Proceed if the model produced a usable
+    // spec this cycle; otherwise fail clearly instead of parking on another
+    // question the user has effectively already been asked.
+    let budget_spent = rec.answers.len() >= MAX_DEFINE_QUESTIONS;
+    if let Some(text) = draft.question.as_ref().filter(|q| !q.trim().is_empty())
+        && !budget_spent
+    {
         rec.question = Some(Question {
             id: "q1".into(),
             kind: "open".into(),
-            text,
+            text: text.clone(),
             options: None,
             prior: None,
             fields: None,
@@ -251,6 +291,12 @@ fn define_stage(record_path: &Path, rec: &mut TaskRecord, expected: &str, model:
         append_log(&mut rec.log, "define", "asked q1");
         persist(record_path, rec, expected)?;
         return Ok(());
+    }
+    if budget_spent && (draft.spec.trim().is_empty() || draft.success.trim().is_empty() || draft.assertions.is_empty()) {
+        return Err(FabrError::BadRequest(format!(
+            "the definer still needs more information after {MAX_DEFINE_QUESTIONS} answered questions; \
+             add detail to the task context and re-delegate"
+        )));
     }
     if draft.spec.trim().is_empty() || draft.success.trim().is_empty() || draft.assertions.is_empty() {
         return Err(FabrError::BadRequest("spec is incomplete".into()));
@@ -272,13 +318,16 @@ fn plan_stage(
     source: &str,
     node_path: &str,
     record_path: &Path,
+    fabric_space: &Path,
     rec: &mut TaskRecord,
     expected: &str,
     model: &impl Model,
     refused: bool,
 ) -> Result<(), FabrError> {
     let note = if refused { rec.approval.as_ref().and_then(|a| a.note.clone()) } else { None };
-    let draft = model.plan(&rec.title, &rec.spec, &rec.success, note.as_deref())?;
+    let keys = tools_contract::load_sponsor_keys(fabric_space);
+    let names = tools_contract::plan_tool_names(&keys);
+    let draft = model.plan_with_tools(&names, &rec.title, &rec.spec, &rec.success, note.as_deref())?;
     if draft.plan.trim().is_empty() || draft.checks.is_empty() {
         return Err(FabrError::BadRequest("plan is incomplete".into()));
     }
@@ -297,6 +346,7 @@ fn plan_stage(
         tools: draft.tools,
         assumptions: Vec::new(),
         checks: draft.checks.into_iter().map(|c| Check { cmd: c.cmd, args: c.args }).collect(),
+        bound_actions: Vec::new(),
     });
     let digest = approval_digest(rec);
     rec.approval = Some(Approval { status: "pending".into(), by: None, at: None, note: None, digest: Some(digest) });
@@ -338,20 +388,31 @@ fn execute_stage(
     // reversible. Otherwise — an irreversible plan, or any non-`write_file`
     // action already applied — we must not auto-replay; route to Evaluate so the
     // checks run and surface a verdict / needs-human instead.
+    let mut expected = expected.to_string();
+    if let Some(msg) = tools_contract::unresolved_external_message(&rec.log) {
+        append_log(&mut rec.log, "execute", &msg);
+        expected = persist(record_path, rec, &expected)?;
+    }
     if execute_interrupted(&rec.log) && !safe_to_replay(rec) {
         rec.step = Some(Step::Evaluate);
         rec.verdict = None;
         append_log(&mut rec.log, "execute", "interrupted execute with uncertain outcome; routing to evaluate instead of replaying");
-        persist(record_path, rec, expected)?;
+        persist(record_path, rec, &expected)?;
         return Ok(());
     }
-    let calls = model.execute(&rec.title, &rec.spec, &rec.plan)?;
-    let mut expected = expected.to_string();
+    let keys = tools_contract::load_sponsor_keys(fabric_space);
+    let approved = rec.plan_meta.as_ref().map(|m| m.tools.clone()).unwrap_or_default();
+    let callable = tools_contract::model_callable(&keys, &rec.grants.granted, &approved);
+    let advertised = tools_contract::to_advertised(&callable);
+    let calls = model.execute_advertised(&rec.title, &rec.spec, &rec.plan, &advertised)?;
     for call in calls {
-        if call.name == "write_file" && log_has_write(&rec.log, &call.path) {
+        if !callable.iter().any(|tool| tool.name == call.name) {
+            return Err(FabrError::BadRequest(format!("unsupported tool {}", call.name)));
+        }
+        if tools_contract::prepare_local(node_dir, &rec.log, &call, &keys)? == LocalPrep::Skip {
             continue;
         }
-        let message = apply_tool(node_dir, &call)?;
+        let message = apply_tool(node_dir, fabric_space, &rec.id, &call)?;
         append_log(&mut rec.log, "execute", &message);
         expected = persist(record_path, rec, &expected)?;
         write_registry(fabric_space, node_dir, record_path, rec, heartbeat_interval_s)?;
@@ -422,27 +483,69 @@ fn assertion_evidence(node_dir: &Path, text: &str, outcome: Option<&CheckOutcome
     }
 }
 
-fn apply_tool(node_dir: &Path, call: &crate::model::ToolCall) -> Result<String, FabrError> {
+fn apply_tool(node_dir: &Path, fabric_space: &Path, task_id: &str, call: &crate::model::ToolCall) -> Result<String, FabrError> {
+    let params = tools_contract::call_params(call);
     match call.name.as_str() {
         "read_file" => {
             let text = tools::read_file(node_dir, &call.path)?;
             Ok(format!("read_file {} ({} bytes)", call.path, text.len()))
         }
         "write_file" => {
-            tools::write_file(node_dir, &call.path, call.content.as_deref().unwrap_or(""))?;
-            Ok(format!("write_file {}", call.path))
+            let path = param_str(&params, "path").unwrap_or(call.path.as_str());
+            let content = param_str(&params, "content").or(call.content.as_deref()).unwrap_or("");
+            tools::write_file(node_dir, path, content)?;
+            let body = tools::read_file(node_dir, path)?;
+            if body != content {
+                return Err(FabrError::BadRequest(format!("write_file {path} could not be verified")));
+            }
+            Ok(format!("write_file {path}"))
         }
         "list_dir" => {
             let names = tools::list_dir(node_dir, &call.path)?;
             Ok(format!("list_dir {} ({})", call.path, names.len()))
         }
+        "recall_preferences" => {
+            let query = param_str(&params, "query").unwrap_or("");
+            let memories = crate::connectors::memory::recall(fabric_space, query)?;
+            Ok(crate::connectors::memory::recall_log(&memories))
+        }
+        "propose_memory" => {
+            let text = param_str(&params, "text").ok_or_else(|| FabrError::BadRequest("missing param text".into()))?;
+            let source = param_str(&params, "source").unwrap_or("explicit");
+            let scope = param_str(&params, "scope").unwrap_or("always");
+            let memory = crate::connectors::memory::propose(fabric_space, text, source, scope, task_id)?;
+            Ok(format!("propose_memory {} proposed", memory.id))
+        }
+        "confirm_memory" => {
+            let id = param_str(&params, "id").ok_or_else(|| FabrError::BadRequest("missing param id".into()))?;
+            let memory = crate::connectors::memory::confirm(fabric_space, id, task_id)?;
+            Ok(format!("confirm_memory {} confirmed", memory.id))
+        }
+        "delete_memory" => {
+            let id = param_str(&params, "id").ok_or_else(|| FabrError::BadRequest("missing param id".into()))?;
+            let memory = crate::connectors::memory::delete(fabric_space, id)?;
+            Ok(format!("delete_memory {} deleted", memory.id))
+        }
+        "bright_data_search" | "bright_data_extract" => {
+            let report = crate::connectors::brightdata::retrieve(fabric_space, call.name.as_str(), &params)?;
+            let section = report.markdown();
+            let body = match tools::read_file(node_dir, "research.md") {
+                Ok(existing) if existing.starts_with("source: bright_data") => format!("{existing}\n---\n{section}"),
+                _ => section,
+            };
+            tools::write_file(node_dir, "research.md", &body)?;
+            let written = tools::read_file(node_dir, "research.md")?;
+            if written != body {
+                return Err(FabrError::BadRequest("research.md could not be verified".into()));
+            }
+            Ok(report.log_line())
+        }
         other => Err(FabrError::BadRequest(format!("unknown tool {other}"))),
     }
 }
 
-fn log_has_write(log: &str, path: &str) -> bool {
-    let needle = format!("execute: write_file {path}");
-    log.lines().any(|line| line.contains(&needle))
+fn param_str<'a>(params: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    params.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty())
 }
 
 /// Whether the persisted log shows an Execute that was started and applied at
@@ -469,7 +572,16 @@ fn execute_interrupted(log: &str) -> bool {
 /// Whether an action logged under `execute:` represents a tool that mutated or
 /// read the workspace (as opposed to bookkeeping lines like `started`).
 fn is_tool_action(action: &str) -> bool {
-    action.starts_with("write_file ") || action.starts_with("read_file ") || action.starts_with("list_dir ")
+    action.starts_with("write_file ")
+        || action.starts_with("read_file ")
+        || action.starts_with("list_dir ")
+        || action.starts_with("recall_preferences ")
+        || action.starts_with("propose_memory ")
+        || action.starts_with("confirm_memory ")
+        || action.starts_with("delete_memory ")
+        || action.starts_with("bright_data_search ")
+        || action.starts_with("bright_data_extract ")
+        || tools_contract::is_external_action(action)
 }
 
 /// Whether an interrupted execute is safe to replay. Replay is only safe when

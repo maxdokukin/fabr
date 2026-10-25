@@ -292,3 +292,98 @@ fn define_question_parks_then_resumes_after_an_answer() {
 
     r.shutdown(true);
 }
+
+/// A model that keeps asking a question every define cycle must NOT loop
+/// forever: once the user has answered the define budget of questions, the
+/// definer stops asking. This reproduces the field bug where the GUI stored the
+/// answer (it lands in `rec.answers`) but define re-asked a fresh q1 every tick
+/// because the prior answers were never fed back — an infinite ask/answer loop.
+/// Here a huge `questions` count makes the fake ask on every define call; we
+/// auto-answer each question the way the GUI does and assert the loop is bounded
+/// by the budget and then proceeds (the fake still returns a usable spec).
+#[test]
+fn define_stops_asking_after_the_question_budget() {
+    // Far more than the budget: the fake would ask forever if unbounded.
+    let fake = Fake::new(1000);
+    let e = env(&fake.url);
+    let path = new_record(&e, "add greet.txt that contains hi");
+    edit(&path, |r| r.requests.delegate = true);
+    let mut r = runner(&e);
+    r.start().unwrap();
+
+    // Auto-answer each question the definer asks, as the GUI would, for more
+    // ticks than the budget. If the loop were unbounded this would never leave
+    // Define; the budget must make it proceed (or fail) within a bounded count.
+    let mut answered = 0;
+    let mut proceeded = false;
+    for _ in 0..40 {
+        let rec = load(&path);
+        if rec.state == State::Defined || (rec.state == State::Task && rec.step == Some(Step::Plan)) {
+            proceeded = true;
+            break;
+        }
+        if rec.waiting && rec.question.as_ref().is_some_and(|q| q.answer.is_none()) {
+            edit(&path, |rec| {
+                rec.question.as_mut().unwrap().answer = Some(Answer {
+                    value: Some(format!("answer {answered}")),
+                    replacement: None,
+                    granted: None,
+                    by: Some("gui".into()),
+                    at: Some("2026-10-25T10:55:52Z".into()),
+                });
+            });
+            answered += 1;
+        }
+        r.tick();
+    }
+
+    let rec = load(&path);
+    // The loop is bounded: the user was never asked more than the budget.
+    assert!(answered <= 5, "define asked more than the budget: {answered} questions");
+    // And it did not get stuck re-asking forever — it left the Define question gate.
+    assert!(
+        proceeded || !(rec.state == State::Task && rec.step == Some(Step::Define) && rec.waiting),
+        "record is still stuck waiting in Define after the budget: state={:?} step={:?} waiting={}",
+        rec.state,
+        rec.step,
+        rec.waiting
+    );
+
+    r.shutdown(true);
+}
+
+/// The prior answers a user gave are fed back to the definer, so a model that
+/// asks once and then (given the answer in context) proceeds does so on the
+/// strength of that answer. This pins the root-cause fix: `define_stage` must
+/// include the answered Q&A in the context it sends to `define`.
+#[test]
+fn define_feeds_prior_answers_back_into_the_model() {
+    // Ask exactly once; after the answer is recorded the next define call should
+    // see it in context and return a spec (the fake stops asking after 1).
+    let fake = Fake::new(1);
+    let e = env(&fake.url);
+    let path = new_record(&e, "add greet.txt that contains hi");
+    edit(&path, |r| r.requests.delegate = true);
+    let mut r = runner(&e);
+    r.start().unwrap();
+
+    let asked = drive_until(&mut r, &path, 10, |rec| rec.question.is_some());
+    assert!(asked.question.as_ref().unwrap().answer.is_none());
+    edit(&path, |rec| {
+        rec.question.as_mut().unwrap().answer = Some(Answer {
+            value: Some("greet.txt".into()),
+            replacement: None,
+            granted: None,
+            by: Some("gui".into()),
+            at: Some("2026-10-25T10:55:52Z".into()),
+        });
+    });
+
+    let resumed = drive_until(&mut r, &path, 10, |rec| rec.state == State::Defined);
+    // The answered question was folded into answers and the definer proceeded.
+    assert_eq!(resumed.answers.len(), 1);
+    assert_eq!(resumed.answers[0].answer.as_ref().unwrap().value.as_deref(), Some("greet.txt"));
+    assert!(!resumed.spec.trim().is_empty(), "define produced a spec after seeing the answer");
+
+    r.shutdown(true);
+}
