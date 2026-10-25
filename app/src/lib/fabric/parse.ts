@@ -54,7 +54,20 @@ function parsePlanMeta(v: unknown): PlanMeta | null {
   const p = v as Record<string, unknown>;
   const req = typeof p.requires === 'object' && p.requires !== null && !Array.isArray(p.requires) ? (p.requires as Record<string, unknown>) : {};
   const requires: Requires = { tools: strings(req.tools), checks: strings(req.checks) };
-  return { ...(p as unknown as PlanMeta), requires };
+  const bound_actions = Array.isArray(p.bound_actions)
+    ? p.bound_actions.flatMap((item) => {
+        if (typeof item !== 'object' || item === null) return [];
+        const a = item as Record<string, unknown>;
+        return [{
+          tool: typeof a.tool === 'string' ? a.tool : '',
+          params: typeof a.params === 'string' ? a.params : '',
+          destination: typeof a.destination === 'string' ? a.destination : '',
+          effect: typeof a.effect === 'string' ? a.effect : '',
+          grant_class: typeof a.grant_class === 'string' ? a.grant_class : '',
+        }];
+      })
+    : [];
+  return { ...(p as unknown as PlanMeta), requires, bound_actions };
 }
 
 export function parseRecord(text: string): TaskRecord {

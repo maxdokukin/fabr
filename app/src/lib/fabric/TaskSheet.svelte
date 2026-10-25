@@ -18,6 +18,7 @@
   <Sheet open={true} title={folderName(folderOf(h.path))} width={720} onclose={() => fabric.open(null)}>
     <RecordScreen
       record={h.record}
+      path={h.path}
       name={folderName(folderOf(h.path))}
       backLabel="Close"
       now={fabric.now}

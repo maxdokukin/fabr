@@ -176,6 +176,7 @@ impl Runner {
         ));
         self.event_cutoff = self.events.newest_at();
         self.clean_stale();
+        self.warn_out_of_root();
         let hb = heartbeat::Heartbeat::new(&self.space, self.hb_interval_s);
         self.beating = Some(heartbeat::Beating::spawn(hb, self.board.clone())?);
         Ok(())
@@ -236,13 +237,49 @@ impl Runner {
         }
     }
 
-    fn records(&self) -> Vec<PathBuf> {
+    /// All task-record paths `fabric::list` discovers under `self.root`, before
+    /// containment filtering. Shared by [`records`](Self::records) (which
+    /// filters) and [`warn_out_of_root`](Self::warn_out_of_root) (which warns on
+    /// the dropped ones) so both start from the same set.
+    fn listed_records(&self) -> Vec<PathBuf> {
         let req = FabricListReq { root: self.root.to_string_lossy().into_owned(), home: None };
         match fabric::list(&req) {
             Ok(res) => res.records.into_iter().map(|f| PathBuf::from(f.path)).collect(),
             Err(e) => {
                 self.sink.warn(format!("cannot list records: {}", e.message()));
                 Vec::new()
+            }
+        }
+    }
+
+    /// The in-scope task-record paths the worker drives.
+    ///
+    /// A path that cannot be canonicalized is kept in scope: a transient stat
+    /// failure must not drop a real record. Only a path that resolves outside
+    /// the canonical root is excluded.
+    fn records(&self) -> Vec<PathBuf> {
+        let listed = self.listed_records();
+        let Ok(root) = self.root.canonicalize() else { return listed };
+        listed.into_iter().filter(|path| in_root(&root, path)).collect()
+    }
+
+    /// Warn once per record whose canonical path escapes the search root.
+    /// Shares `bad_records` with [`load`](Self::load).
+    fn warn_out_of_root(&mut self) {
+        let Ok(root) = self.root.canonicalize() else { return };
+        for path in self.listed_records() {
+            if in_root(&root, &path) {
+                continue;
+            }
+            let Ok(canon) = path.canonicalize() else { continue };
+            if self.bad_records.insert(path.clone()) {
+                self.sink.warn(format!(
+                    "record {} resolves to {}, outside the default folder {}; excluded from driving — \
+                     check for a symlink escaping the search root",
+                    path.display(),
+                    canon.display(),
+                    root.display()
+                ));
             }
         }
     }
@@ -750,9 +787,170 @@ fn event_keys(path: &Path, rec: &TaskRecord) -> Vec<EventKey> {
     out
 }
 
+/// A path that cannot be canonicalized stays in scope. A resolved path is in
+/// scope only when it lives under the already-canonical search root.
+fn in_root(root_canon: &Path, path: &Path) -> bool {
+    match path.canonicalize() {
+        Ok(canon) => canon.starts_with(root_canon),
+        Err(_) => true,
+    }
+}
+
 fn parse_failed_line(line: &str) -> Option<(String, String)> {
     let body = line.strip_prefix("- ")?;
     let (at, rest) = body.split_once(' ')?;
     let (_, msg) = rest.split_once(": ")?;
     msg.starts_with("failed after ").then(|| (at.to_string(), clean_message(msg, 160)))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Containment unit tests for task 2.2
+    //! (agent-workspace-scope-and-notice-routing).
+    //!
+    //! `records` keeps only the paths for which [`in_root`] is true, and
+    //! `warn_out_of_root` warns on exactly the paths for which [`in_root`] is
+    //! false. Both read the single [`in_root`] predicate, so these tests pin
+    //! that predicate (and the `records`-style filter built from it) against a
+    //! `tempfile` tree — mirroring `fabr-core`'s `fabric.rs` tests — covering an
+    //! out-of-root path, a deeply-nested in-root path, a symlink escape, and an
+    //! un-canonicalizable path. The behavioral end-to-end driving path is pinned
+    //! separately by `tests/out_of_root_driven.rs`.
+    //!
+    //! _Requirements: 1.2, 3.1, 3.5_ · _Validates: Property 1a_
+
+    use super::in_root;
+    use std::path::{Path, PathBuf};
+
+    /// A `tempfile` tree with the search root, a deeply-nested in-root record, a
+    /// sibling directory outside the canonical root, and a symlink inside the
+    /// root whose target escapes to that sibling. Mirrors the layout the broad
+    /// `default_folder` search root sees in production.
+    ///
+    /// ```text
+    /// <tmp>/
+    ///   root/                                     (the canonical search root)
+    ///     a/b/c/.fabric-space/tasks/deep.md       (legitimately nested, any depth)
+    ///     link.md -> <tmp>/outside/escape.md      (symlink escaping the root)
+    ///   outside/
+    ///     escape.md                               (the real escape target)
+    /// ```
+    struct Tree {
+        _tmp: tempfile::TempDir,
+        root: PathBuf,
+        root_canon: PathBuf,
+        deep: PathBuf,
+        escape_link: PathBuf,
+    }
+
+    fn tree() -> Tree {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let outside = tmp.path().join("outside");
+
+        // A legitimately-nested in-root record at depth (regression 3.5: a
+        // search root holds records at any depth).
+        let deep = root.join("a").join("b").join("c").join(".fabric-space").join("tasks").join("deep.md");
+        std::fs::create_dir_all(deep.parent().unwrap()).unwrap();
+        std::fs::write(&deep, "deep").unwrap();
+
+        // A real file under the sibling `outside` dir, and a symlink inside the
+        // root pointing at it: the link is lexically in-root but canonicalizes
+        // outside — a genuine search-root escape.
+        std::fs::create_dir_all(&outside).unwrap();
+        let escape_target = outside.join("escape.md");
+        std::fs::write(&escape_target, "escape").unwrap();
+        let escape_link = root.join("link.md");
+        symlink_file(&escape_target, &escape_link);
+
+        // `self.root` is canonicalized once by both callers; mirror that here.
+        let root_canon = root.canonicalize().unwrap();
+        Tree { _tmp: tmp, root, root_canon, deep, escape_link }
+    }
+
+    fn symlink_file(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(target, link).unwrap();
+    }
+
+    /// The `records`-style filter: keep exactly the paths `records` keeps
+    /// (`in_root` true). Built from the same predicate `records` applies so the
+    /// test exercises the real containment rule rather than a copy of it.
+    fn kept(root_canon: &Path, listed: &[PathBuf]) -> Vec<PathBuf> {
+        listed.iter().filter(|p| in_root(root_canon, p)).cloned().collect()
+    }
+
+    #[test]
+    fn nested_in_root_path_is_kept() {
+        let t = tree();
+        assert!(
+            in_root(&t.root_canon, &t.deep),
+            "a legitimately-nested in-root record must be kept (regression 3.5): {}",
+            t.deep.display()
+        );
+    }
+
+    #[test]
+    fn symlink_escape_path_is_excluded() {
+        let t = tree();
+        // Sanity: the escape link is lexically inside the (un-canonicalized)
+        // root, yet canonicalizes outside — the exact production escape.
+        assert!(t.escape_link.starts_with(&t.root), "the escape link must be lexically in-root: {}", t.escape_link.display());
+        assert!(
+            !t.escape_link.canonicalize().unwrap().starts_with(&t.root_canon),
+            "the escape link must canonicalize outside the root: {}",
+            t.escape_link.display()
+        );
+        assert!(
+            !in_root(&t.root_canon, &t.escape_link),
+            "a symlink escaping the search root must be excluded: {}",
+            t.escape_link.display()
+        );
+    }
+
+    #[test]
+    fn out_of_root_path_is_excluded_from_records() {
+        let t = tree();
+        // A real path under the sibling `outside` dir (not reached via the
+        // in-root link): directly out of the canonical root.
+        let out_of_root = t._tmp.path().join("outside").join("escape.md");
+        let listed = [t.deep.clone(), out_of_root.clone(), t.escape_link.clone()];
+        let kept = kept(&t.root_canon, &listed);
+        assert_eq!(
+            kept,
+            vec![t.deep.clone()],
+            "records must keep only the in-root record, dropping the out-of-root path and the symlink escape"
+        );
+        assert!(!in_root(&t.root_canon, &out_of_root), "an out-of-root path must be excluded from records: {}", out_of_root.display());
+    }
+
+    #[test]
+    fn uncanonicalizable_path_is_kept_in_scope() {
+        let t = tree();
+        // A path that does not exist on disk cannot be canonicalized; a
+        // transient stat failure must never silently drop a real in-root record,
+        // so `in_root` keeps it in-scope (returns true).
+        let missing = t.root.join("a").join("b").join("c").join(".fabric-space").join("tasks").join("not-on-disk.md");
+        assert!(missing.canonicalize().is_err(), "the fixture path must be un-canonicalizable: {}", missing.display());
+        assert!(in_root(&t.root_canon, &missing), "an un-canonicalizable path must be kept in-scope: {}", missing.display());
+    }
+
+    #[test]
+    fn in_root_matches_the_verdict_warn_out_of_root_uses() {
+        let t = tree();
+        // `records` keeps `in_root`-true paths; `warn_out_of_root` warns on
+        // `in_root`-false paths. Over the same listed set the two must partition
+        // it exactly — kept and warned are disjoint and together cover every
+        // path — so detection and exclusion cannot drift.
+        let out_of_root = t._tmp.path().join("outside").join("escape.md");
+        let listed = [t.deep.clone(), out_of_root.clone(), t.escape_link.clone()];
+        let kept: Vec<_> = listed.iter().filter(|p| in_root(&t.root_canon, p)).cloned().collect();
+        let warned: Vec<_> = listed.iter().filter(|p| !in_root(&t.root_canon, p)).cloned().collect();
+        assert_eq!(kept, vec![t.deep.clone()], "records keeps only the in-root record");
+        assert_eq!(warned, vec![out_of_root.clone(), t.escape_link.clone()], "warn_out_of_root warns on exactly the excluded records");
+        assert!(kept.iter().all(|p| !warned.contains(p)), "kept and warned must be disjoint");
+        assert_eq!(kept.len() + warned.len(), listed.len(), "every listed path is either kept or warned, never both or neither");
+    }
 }

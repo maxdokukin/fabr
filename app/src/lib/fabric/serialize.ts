@@ -128,6 +128,18 @@ export function serializeFrontMatter(r: TaskRecord): string[] {
             for (const c of p.checks) add(`    - cmd: ${scalar(c.cmd)}`, `      args: ${flowList(c.args)}`);
           }
         }
+        if (p.bound_actions?.length) {
+          add('  bound_actions:');
+          for (const a of p.bound_actions) {
+            add(
+              `    - tool: ${scalar(a.tool)}`,
+              `      params: ${scalar(a.params)}`,
+              `      destination: ${scalar(a.destination)}`,
+              `      effect: ${scalar(a.effect)}`,
+              `      grant_class: ${scalar(a.grant_class)}`,
+            );
+          }
+        }
         break;
       }
       case 'assertions': add(...itemList('assertions', r.assertions)); break;

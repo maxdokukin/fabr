@@ -194,6 +194,23 @@ pub struct Check {
     pub args: Vec<String>,
 }
 
+/// One concrete operation covered by the approval digest.
+///
+/// Absent on records that predate parameter binding. An empty list is omitted
+/// from the digest so those approvals keep the same hash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundAction {
+    pub tool: String,
+    /// Canonical JSON of the resolved parameters.
+    pub params: String,
+    #[serde(default)]
+    pub destination: String,
+    #[serde(default)]
+    pub effect: String,
+    #[serde(default)]
+    pub grant_class: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlanMeta {
     #[serde(default)]
@@ -206,6 +223,9 @@ pub struct PlanMeta {
     pub checks: Vec<Check>,
     #[serde(default)]
     pub requires: PlanRequires,
+    /// Included in [`approval_digest`] only when non-empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bound_actions: Vec<BoundAction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -527,6 +547,21 @@ pub fn approval_digest(rec: &TaskRecord) -> String {
             }
             h.update([8]);
         }
+        if !m.bound_actions.is_empty() {
+            h.update([9]);
+            for action in &m.bound_actions {
+                h.update(action.tool.as_bytes());
+                h.update([10]);
+                h.update(action.params.as_bytes());
+                h.update([11]);
+                h.update(action.destination.as_bytes());
+                h.update([12]);
+                h.update(action.effect.as_bytes());
+                h.update([13]);
+                h.update(action.grant_class.as_bytes());
+                h.update([14]);
+            }
+        }
     }
     format!("{:x}", h.finalize())
 }
@@ -760,6 +795,37 @@ mod tests {
         assert_eq!(d1, approval_digest(&rec));
         rec.plan.push_str("\n7. extra step");
         assert_ne!(d1, approval_digest(&rec));
+    }
+
+    #[test]
+    fn empty_bound_actions_keep_the_current_digest() {
+        let mut rec = parse(
+            &std::fs::read_to_string(fixtures_dir().join("04-awaiting-approval/project/.fabric-space/tasks/2026-10-24-order-filament.md"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(rec.plan_meta.as_ref().is_some_and(|m| m.bound_actions.is_empty()));
+        let previous = approval_digest(&rec);
+        let text = render(&rec);
+        assert!(!text.contains("bound_actions"));
+        let again = parse(&text).unwrap();
+        assert_eq!(previous, approval_digest(&again));
+        assert_eq!(previous, approval_digest(&parse(&render(&again)).unwrap()));
+        rec.plan_meta.as_mut().unwrap().bound_actions.push(BoundAction {
+            tool: "bright_data_extract".into(),
+            params: "{\"url\":\"https://docs.rs/ureq\"}".into(),
+            destination: "https://docs.rs/ureq".into(),
+            effect: "remote_read".into(),
+            grant_class: "external_action".into(),
+        });
+        let with_bound = approval_digest(&rec);
+        assert_ne!(previous, with_bound);
+        assert!(render(&rec).contains("bound_actions"));
+        rec.plan_meta.as_mut().unwrap().bound_actions[0].destination = "https://example.com/other".into();
+        assert_ne!(with_bound, approval_digest(&rec));
+        rec.plan_meta.as_mut().unwrap().bound_actions.clear();
+        assert_eq!(previous, approval_digest(&rec));
+        assert!(!render(&rec).contains("bound_actions"));
     }
 
     #[test]

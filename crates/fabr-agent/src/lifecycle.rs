@@ -36,18 +36,19 @@ impl Ctl {
             execute_max_turns: crate::settings::DEFAULT_EXECUTE_MAX_TURNS,
             evaluate_max_reads: crate::settings::DEFAULT_EVALUATE_MAX_READS,
             harness: Harness::standard(),
-            tools: default_tools(),
+            tools: Arc::new(crate::sponsor_tools::WorkspaceTools::new(space)),
         }
     }
 
     pub fn with_board(board: Arc<Board>, check_timeout_s: u64) -> Ctl {
+        let tools = Arc::new(crate::sponsor_tools::WorkspaceTools::new(board.space()));
         Ctl {
             board,
             check_timeout_s,
             execute_max_turns: crate::settings::DEFAULT_EXECUTE_MAX_TURNS,
             evaluate_max_reads: crate::settings::DEFAULT_EVALUATE_MAX_READS,
             harness: Harness::standard(),
-            tools: default_tools(),
+            tools,
         }
     }
 }
@@ -79,7 +80,12 @@ fn check_approval(rec: &TaskRecord) -> Result<Option<&'static str>, FabrError> {
 }
 
 pub fn validate_plan(meta: &PlanMeta) -> Result<(), FabrError> {
-    let known = default_tools().names();
+    let mut known = default_tools().names();
+    for name in crate::tools_contract::executable_names() {
+        if !known.iter().any(|have| have == name) {
+            known.push(name.to_string());
+        }
+    }
     for tool in &meta.tools {
         if !known.contains(tool) {
             return Err(FabrError::BadRequest(format!("unsupported tool {tool}")));
@@ -346,7 +352,7 @@ fn harness_gate(
     label: &str,
 ) -> Result<bool, FabrError> {
     let Some(meta) = rec.plan_meta.clone() else { return Ok(true) };
-    match ctl.harness.missing(&meta) {
+    match ctl.harness.missing_with(&meta, &ctl.tools.names()) {
         None => {
             if rec.needs.is_some() {
                 rec.needs = None;
@@ -614,6 +620,7 @@ fn plan_stage(
     mark(ctl, node_dir, record_path, &view, Activity::Model);
     let allowed = ctl.harness.planning();
     let answers = answers_text(rec);
+    let tools_note = crate::tools_contract::planner_view(&crate::tools_contract::load_sponsor_keys(ctl.board.space()));
     let ask = |rejection: Option<&str>| {
         model.plan(&PlanInput {
             title: &rec.title,
@@ -624,6 +631,7 @@ fn plan_stage(
             answers: &answers,
             allowed: &allowed,
             rejection,
+            tools_note: &tools_note,
         })
     };
     let human_plan = rec.by.plan == Some(Author::Human) && !rec.plan.trim().is_empty();
@@ -647,6 +655,21 @@ fn plan_stage(
             (meta, Some(draft))
         }
     };
+    if draft.is_some() {
+        for bound in model.planned_bounds() {
+            crate::tools_contract::bind_action(&mut meta, &bound.tool, &bound.params)?;
+        }
+        for action in &meta.bound_actions {
+            if !action.grant_class.is_empty() && !rec.grants.requested.iter().any(|field| field == &action.grant_class) {
+                rec.grants.requested.push(action.grant_class.clone());
+            }
+        }
+    }
+    for tool in meta.tools.clone() {
+        if crate::tools_contract::must_bind(&tool) && !meta.bound_actions.iter().any(|action| action.tool == tool) {
+            return Err(FabrError::BadRequest(format!("plan must bind parameters for {tool}")));
+        }
+    }
     meta.requires = requires_of(&meta);
     let invalid = validate_plan(&meta).err();
     if let Some(draft) = draft {
@@ -670,7 +693,7 @@ fn plan_stage(
     }
     rec.needs = None;
     if let Some(err) = invalid {
-        let missing = ctl.harness.missing(&meta).unwrap_or_else(|| clean_message(&err.message(), 160));
+        let missing = ctl.harness.missing_with(&meta, &ctl.tools.names()).unwrap_or_else(|| clean_message(&err.message(), 160));
         rec.needs = Some(format!("harness: {missing}"));
         append_log(&mut rec.log, "plan", &format!("needs harness: {missing}"));
     }
@@ -703,6 +726,7 @@ fn meta_of(draft: &crate::model::PlanDraft, plan_kept: bool) -> Result<PlanMeta,
         assumptions: Vec::new(),
         checks: draft.checks.iter().map(|c| Check { cmd: c.cmd.clone(), args: c.args.clone() }).collect(),
         requires: Default::default(),
+        bound_actions: Vec::new(),
     })
 }
 
@@ -794,6 +818,15 @@ fn execute_stage(
         rec.answers.push(q);
         rec.waiting = false;
     }
+    if let Some(msg) = crate::tools_contract::unresolved_external_message(&rec.log) {
+        append_log(&mut rec.log, "execute", &msg);
+        append_log(&mut rec.log, "execute", "reconciliation required; external result is UNKNOWN");
+        rec.step = Some(Step::Evaluate);
+        rec.verdict = None;
+        persist(record_path, rec, base)?;
+        mark(ctl, node_dir, record_path, rec, Activity::Tool);
+        return Ok(());
+    }
     let prior_log = rec.log.clone();
     let allowed = allowed_tools(&*ctl.tools, rec);
     let view = Only::new(&*ctl.tools, allowed.clone());
@@ -840,10 +873,20 @@ fn execute_stage(
                     } else if !allowed_here {
                         append_log(&mut rec.log, "execute", &format!("tool failed: {} not allowed", call.name));
                         (format!("tool {} is not allowed", call.name), true)
+                    } else if let Some(external) = external_call(node_dir, record_path, ctl, rec, base, &view, call)? {
+                        if external.stop {
+                            return Ok(());
+                        }
+                        (external.content, external.is_error)
                     } else {
                         match view.call(node_dir, call) {
                             Ok(result) => {
-                                append_log(&mut rec.log, "execute", format!("{} {}", call.name, call.path).trim_end());
+                                let line = if matches!(call.name.as_str(), "read_file" | "write_file" | "list_dir" | "make_dir") {
+                                    format!("{} {}", call.name, call.path).trim_end().to_string()
+                                } else {
+                                    clean_message(&result, 400)
+                                };
+                                append_log(&mut rec.log, "execute", &line);
                                 (result, false)
                             }
                             Err(e) => {
@@ -935,11 +978,20 @@ fn finish_checks(
         let pass = items.iter().all(|i| i.pass);
         (items, pass)
     };
+    let unknown = crate::tools_contract::log_has_unknown(&rec.log);
+    let pass = pass && !unknown;
     rec.verdict = Some(Verdict { result: if pass { "pass" } else { "fail" }.into(), at: now_utc(), items });
     rec.state = if pass { State::Succeeded } else { State::Failed };
     rec.step = Some(Step::Learn);
     rec.waiting = false;
-    append_log(&mut rec.log, "evaluate", if pass { "verdict pass" } else { "verdict fail" });
+    let evaluate_line = if pass {
+        "verdict pass"
+    } else if unknown {
+        "verdict fail; external UNKNOWN requires reconciliation"
+    } else {
+        "verdict fail"
+    };
+    append_log(&mut rec.log, "evaluate", evaluate_line);
     persist(record_path, rec, base)?;
     mark(ctl, node_dir, record_path, rec, Activity::Tool);
     Ok(())
@@ -961,6 +1013,88 @@ fn ground_checks(node_dir: &Path, meta: &mut PlanMeta, plan: &str, log: &mut Str
         }
         !unknown
     });
+}
+
+struct ExternalReport {
+    content: String,
+    is_error: bool,
+    stop: bool,
+}
+
+fn external_call(
+    node_dir: &Path,
+    record_path: &Path,
+    ctl: &Ctl,
+    rec: &mut TaskRecord,
+    base: &mut TaskRecord,
+    view: &dyn ToolSet,
+    call: &crate::model::ToolCall,
+) -> Result<Option<ExternalReport>, FabrError> {
+    let params = crate::tools_contract::call_params(call);
+    if crate::tools_contract::in_catalog(&call.name) {
+        let keys = crate::tools_contract::load_sponsor_keys(ctl.board.space());
+        let approved = rec.plan_meta.as_ref().map(|m| m.tools.clone()).unwrap_or_default();
+        let bound = rec.plan_meta.as_ref().map(|m| m.bound_actions.clone()).unwrap_or_default();
+        crate::tools_contract::execution_allowed(&call.name, &keys, &rec.grants.granted, &approved, &bound, &params)?;
+    }
+    if !crate::tools_contract::must_bind(&call.name) {
+        return Ok(None);
+    }
+    let id = crate::tools_contract::invocation_id(&rec.id, &call.name, &params);
+    if crate::tools_contract::external_replay(&rec.log, &id, crate::tools_contract::Idempotency::Never)
+        == crate::tools_contract::ExternalReplay::DoNotReplay
+    {
+        if let Some(msg) = crate::tools_contract::unresolved_external_message(&rec.log) {
+            return Ok(Some(park_unknown(record_path, rec, base, &msg)?));
+        }
+        return Err(FabrError::BadRequest(format!("external {} is not replayed", call.name)));
+    }
+    append_log(&mut rec.log, "execute", &crate::tools_contract::external_intent_message(&id, &call.name));
+    persist(record_path, rec, base)?;
+    match view.call(node_dir, call) {
+        Ok(text) if unknown_text(&text) => Ok(Some(park_unknown(
+            record_path,
+            rec,
+            base,
+            &crate::tools_contract::external_unknown_message(&id, &call.name, unknown_label(&text)),
+        )?)),
+        Ok(text) => {
+            let evidence = clean_message(&text, 180);
+            append_log(&mut rec.log, "execute", &format!("external {id} {} succeeded {evidence}", call.name));
+            persist(record_path, rec, base)?;
+            Ok(Some(ExternalReport { content: text, is_error: false, stop: false }))
+        }
+        Err(err) if unknown_text(&err) => Ok(Some(park_unknown(
+            record_path,
+            rec,
+            base,
+            &crate::tools_contract::external_unknown_message(&id, &call.name, unknown_label(&err)),
+        )?)),
+        Err(err) => {
+            let msg = clean_message(&err, 160);
+            append_log(&mut rec.log, "execute", &format!("external {id} {} failed {msg}", call.name));
+            persist(record_path, rec, base)?;
+            Ok(Some(ExternalReport { content: msg, is_error: true, stop: false }))
+        }
+    }
+}
+
+fn unknown_text(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    lower == "timeout" || lower == "unavailable" || lower.starts_with("timeout ") || lower.starts_with("unavailable ")
+}
+
+fn unknown_label(text: &str) -> &'static str {
+    if text.to_ascii_lowercase().contains("timeout") { "timeout" } else { "unavailable" }
+}
+
+fn park_unknown(record_path: &Path, rec: &mut TaskRecord, base: &mut TaskRecord, message: &str) -> Result<ExternalReport, FabrError> {
+    append_log(&mut rec.log, "execute", message);
+    append_log(&mut rec.log, "execute", "reconciliation required; external result is UNKNOWN");
+    rec.step = Some(Step::Evaluate);
+    rec.verdict = None;
+    persist(record_path, rec, base)?;
+    Ok(ExternalReport { content: message.to_string(), is_error: true, stop: true })
 }
 
 fn log_has_write(log: &str, path: &str) -> bool {

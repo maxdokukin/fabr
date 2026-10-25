@@ -46,12 +46,21 @@ export interface Question {
 
 export interface Grants { requested: string[]; granted: { field: string; scope: Scope }[] }
 
+export interface BoundAction {
+  tool: string;
+  params: string;
+  destination: string;
+  effect: string;
+  grant_class: string;
+}
+
 export interface PlanMeta {
   reversibility: 'reversible' | 'irreversible';
   tools: string[];
   requires: Requires;
   assumptions: { rule_id: string; text: string }[];
   checks?: { cmd: string; args: string[] }[];
+  bound_actions: BoundAction[];
 }
 
 export interface Assertion { id: string; text: string }

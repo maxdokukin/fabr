@@ -47,8 +47,8 @@ pub use settings::{Settings, TestResult};
 pub use sources::{Source, default_local, load_sources, save_sources};
 pub use stamp::stamp_paths;
 pub use taskrec::{
-    Actor, Answer, Approval, ApprovalStatus, Assertion, Assumption, Check, Grant, Grants, GuiPatch, Links, PlanMeta, Prior, Question,
-    QuestionKind, Requests, Reversibility, Scope, State, Step, TaskRecord, TaskSource, Verdict, VerdictItem, apply_gui, approval_digest,
-    normalize_section, parse, registry_filename, render, stamp_updated, write_record,
+    Actor, Answer, Approval, ApprovalStatus, Assertion, Assumption, BoundAction, Check, Grant, Grants, GuiPatch, Links, PlanMeta, Prior,
+    Question, QuestionKind, Requests, Reversibility, Scope, State, Step, TaskRecord, TaskSource, Verdict, VerdictItem, apply_gui,
+    approval_digest, normalize_section, parse, registry_filename, render, stamp_updated, write_record,
 };
 pub use workspace::Workspace;

@@ -14,12 +14,14 @@
   import { editStart, isEditable, provenance, REDO_LABEL, REDO_PENDING, type FieldsEdit, type Section } from './sections';
   import { canShelve, isOpen, phaseOf } from './phase';
   import { suspendLabel } from './stage';
+  import SpeechCapture from './SpeechCapture.svelte';
   import StateRibbon from './StateRibbon.svelte';
   import { minuteOf } from '../model';
   import type { TaskRecord } from './types';
 
-  let { record, name, backLabel = 'Records', agent, onback, onanswer, onapprove, onrequest, onedit, onfields, onsuspend, onunsuspend, now = new Date(), onreload, readonly = false }: {
+  let { record, path = '', name, backLabel = 'Records', agent, onback, onanswer, onapprove, onrequest, onedit, onfields, onsuspend, onunsuspend, now = new Date(), onreload, readonly = false }: {
     record: TaskRecord;
+    path?: string;
     name: string;
     backLabel?: string;
     agent?: Snippet;
@@ -297,6 +299,10 @@
       </Group>
     {/if}
 
+    {#if path}
+      <SpeechCapture {path} log={s.log} />
+    {/if}
+
     <Group header="Log">
       <div class="blk">
         {#if s.logEntries.length}
@@ -309,8 +315,11 @@
 
     <Group header="Verdict">
       <div class="blk">
+        {#if s.logEntries.some((e) => e.message.includes('UNKNOWN'))}
+          <p class="warn" data-testid="unknown-outcome">Failed. Waiting for reconciliation. This is not a success.</p>
+        {/if}
         {#if record.verdict}
-          <p class="txt"><b class:warn={record.verdict.result === 'fail'}>{record.verdict.result}</b> at {record.verdict.at}</p>
+          <p class="txt"><b class:warn={record.verdict.result === 'fail' || s.logEntries.some((e) => e.message.includes('UNKNOWN'))}>{record.verdict.result}</b> at {record.verdict.at}</p>
           <ul class="list">
             {#each record.verdict.items as i (i.id)}
               <li class="assert"><span class="mark mark--{i.pass ? 'pass' : 'fail'}">{i.pass ? '✓' : '✗'}</span><span><b>{i.id}</b> {i.evidence}</span></li>

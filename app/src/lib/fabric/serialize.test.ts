@@ -49,6 +49,27 @@ describe('serializeRecord', () => {
     expect([out.pri, out.due]).toEqual([2, '2026-11-01T09:30']);
   });
 
+  it('round-trips bound actions and omits an empty list', () => {
+    const r = parseRecord(records[0].text);
+    const withAction = {
+      ...r,
+      plan_meta: {
+        reversibility: 'reversible' as const,
+        tools: ['cartesia_speak'],
+        requires: { tools: [], checks: [] },
+        assumptions: [],
+        checks: [],
+        bound_actions: [{ tool: 'cartesia_speak', params: '{"path":"speech.wav"}', destination: 'speech.wav', effect: 'external_effect', grant_class: 'external_action' }],
+      },
+    };
+    const out = serializeRecord(withAction);
+    expect(out).toContain('bound_actions:');
+    expect(out).toContain('tool: cartesia_speak');
+    expect(parseRecord(out).plan_meta?.bound_actions).toEqual(withAction.plan_meta.bound_actions);
+    const cleared = serializeRecord({ ...withAction, plan_meta: { ...withAction.plan_meta, bound_actions: [] } });
+    expect(cleared).not.toContain('bound_actions');
+  });
+
   it('refuses an unknown schema and a bad pri', () => {
     const text = records[0].text;
     expect(() => parseRecord(text.replace(/^schema: 4$/m, 'schema: 9'))).toThrow(/schema/);

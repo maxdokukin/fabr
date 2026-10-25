@@ -165,6 +165,7 @@ fn meta(reversibility: &str, tools: &[&str], assumptions: &[(&str, &str)]) -> Pl
         assumptions: assumptions.iter().map(|(id, text)| Assumption { rule_id: s(id), text: s(text) }).collect(),
         checks: Vec::new(),
         requires: Default::default(),
+        bound_actions: Vec::new(),
     }
 }
 

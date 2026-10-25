@@ -38,8 +38,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: app
-          tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.0.0-manual' }}
-          releaseName: Fabr ${{ github.ref_type == 'tag' && github.ref_name || 'v0.0.0-manual' }}
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.8.1-manual' }}
+          releaseName: Fabr ${{ github.ref_type == 'tag' && github.ref_name || 'v0.8.1-manual' }}
+          releaseBody: |
+            Fabr 0.8.1 keeps the approve-then-execute loop readable after a multiline answer.
+            A question answer that spans lines, including an address, no longer hides the approval panel.
+            An approval with no bound action still runs only the local tools. A remote call needs its own grant.
+            Included when a credential is present: Bright Data search and extract, Moss list and retrieve, Cartesia speak and transcribe, an Apify Actor lookup, and a labeled Nessie sandbox read.
+            Local learned preferences stay authoritative. Moss upload, Fo account actions, Visa checkout, Figma, Atlassian Forge, and a Microsoft metrics client are not included.
           releaseDraft: false
           prerelease: ${{ github.ref_type == 'tag' && contains(github.ref_name, '-') }}
           args: --target aarch64-apple-darwin --bundles app,dmg

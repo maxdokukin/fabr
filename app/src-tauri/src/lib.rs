@@ -1,6 +1,7 @@
 mod agent;
 
 use agent::AgentHost;
+use base64::Engine;
 use fabr_core::ops::{Desktop, Done, dispatch, url_allowed};
 use fabr_core::workspace::Workspace;
 use fabr_core::{AppDirs, ErrorDto, FabrError, client_error};
@@ -34,6 +35,8 @@ fn call(ws: State<'_, Workspace>, host: State<'_, AgentHost>, name: String, req:
     match name.as_str() {
         "fabric_agent_status" => return status(host.status()),
         "fabric_agent_start" => return status(start_agent(&host)),
+        "fabric_write_capture" => return speech(&name, write_capture(&req)),
+        "fabric_read_speech" => return speech(&name, read_speech(&req)),
         _ => {}
     }
     let out = match dispatch(&ws, &name, req) {
@@ -42,6 +45,46 @@ fn call(ws: State<'_, Workspace>, host: State<'_, AgentHost>, name: String, req:
         Err(e) => Err(e),
     };
     out.map_err(|e| client_error(&name, e))
+}
+
+fn speech(name: &str, result: Result<serde_json::Value, FabrError>) -> Result<serde_json::Value, ErrorDto> {
+    result.map_err(|e| client_error(name, e))
+}
+
+fn node_of(task_path: &str) -> Result<std::path::PathBuf, FabrError> {
+    let path = std::path::Path::new(task_path);
+    let tasks = path.parent().ok_or_else(|| FabrError::BadRequest("task path is not a record".into()))?;
+    let space = tasks.parent().ok_or_else(|| FabrError::BadRequest("task path is not a record".into()))?;
+    let tasks_name = tasks.file_name().and_then(|s| s.to_str());
+    let space_name = space.file_name().and_then(|s| s.to_str());
+    if tasks_name != Some("tasks") || space_name != Some(".fabric-space") {
+        return Err(FabrError::BadRequest("task path is not a record".into()));
+    }
+    space.parent().map(std::path::Path::to_path_buf).ok_or_else(|| FabrError::BadRequest("task path is not a record".into()))
+}
+
+fn write_capture(req: &serde_json::Value) -> Result<serde_json::Value, FabrError> {
+    let task = req.get("task_path").and_then(|v| v.as_str()).unwrap_or("");
+    let encoded = req.get("audio_base64").and_then(|v| v.as_str()).unwrap_or("");
+    let bytes =
+        base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|_| FabrError::BadRequest("audio is not base64".into()))?;
+    if bytes.is_empty() || bytes.len() > 5_000_000 {
+        return Err(FabrError::BadRequest("audio is empty or too large".into()));
+    }
+    let node = node_of(task)?;
+    fabr_agent::toolset::write_node_bytes(&node, "capture.wav", &bytes).map_err(FabrError::BadRequest)?;
+    Ok(serde_json::json!({ "path": "capture.wav" }))
+}
+
+fn read_speech(req: &serde_json::Value) -> Result<serde_json::Value, FabrError> {
+    let task = req.get("task_path").and_then(|v| v.as_str()).unwrap_or("");
+    let text = std::fs::read_to_string(task).map_err(|e| FabrError::Io(e.to_string()))?;
+    if !(text.contains("cartesia_speak") && text.contains("succeeded")) {
+        return Err(FabrError::BadRequest("speech.wav plays only after an approved cartesia_speak run succeeds".into()));
+    }
+    let node = node_of(task)?;
+    let bytes = fabr_agent::toolset::read_node_bytes(&node, "speech.wav").map_err(FabrError::BadRequest)?;
+    Ok(serde_json::json!({ "audio_base64": base64::engine::general_purpose::STANDARD.encode(bytes) }))
 }
 
 fn start_agent(host: &AgentHost) -> agent::Status {
@@ -105,5 +148,28 @@ pub fn run() {
         log::error!("tauri failed: {e}");
         eprintln!("fabr: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod speech_tests {
+    use super::{read_speech, write_capture};
+
+    #[test]
+    fn capture_lands_in_the_node_and_speech_waits_for_a_successful_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = dir.path().join("desk");
+        let tasks = node.join(".fabric-space").join("tasks");
+        std::fs::create_dir_all(&tasks).unwrap();
+        let task = tasks.join("demo.md");
+        std::fs::write(&task, "log without a speak result\n").unwrap();
+        let req = serde_json::json!({ "task_path": task.to_string_lossy(), "audio_base64": "aGk=" });
+        assert_eq!(write_capture(&req).unwrap()["path"], "capture.wav");
+        assert_eq!(std::fs::read(node.join("capture.wav")).unwrap(), b"hi");
+        assert!(read_speech(&serde_json::json!({ "task_path": task.to_string_lossy() })).is_err());
+        std::fs::write(node.join("speech.wav"), b"wav").unwrap();
+        std::fs::write(&task, "cartesia_speak succeeded\n").unwrap();
+        let played = read_speech(&serde_json::json!({ "task_path": task.to_string_lossy() })).unwrap();
+        assert_eq!(played["audio_base64"], "d2F2");
     }
 }

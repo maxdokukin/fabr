@@ -49,7 +49,7 @@ fn greet_plan() -> PlanDraft {
 }
 
 fn write_call() -> ToolCall {
-    ToolCall { name: "write_file".into(), path: "greet.md".into(), content: Some("hi".into()) }
+    ToolCall { name: "write_file".into(), path: "greet.md".into(), content: Some("hi".into()), params: None }
 }
 
 fn record_path(root: &Path) -> PathBuf {
@@ -317,7 +317,7 @@ fn restart_does_not_write_the_file_twice() {
     let root = ws.local_path(&NodeRef { source: "local".into(), path: String::new() }).unwrap();
     let model = ScriptedModel::new(
         greet_plan(),
-        vec![ToolCall { name: "write_file".into(), path: "greet.md".into(), content: Some("HI-AGAIN".into()) }],
+        vec![ToolCall { name: "write_file".into(), path: "greet.md".into(), content: Some("HI-AGAIN".into()), params: None }],
     );
     let path = save_one(&ws, "resume");
     let id = load(&path).id.clone();
@@ -334,6 +334,7 @@ fn restart_does_not_write_the_file_twice() {
         assumptions: Vec::new(),
         checks: vec![taskrec::Check { cmd: "test".into(), args: vec!["-f".into(), "greet.md".into()] }],
         requires: Default::default(),
+        bound_actions: Vec::new(),
     });
     let expected = rec.updated_at.clone();
     taskrec::write_record(&path, &rec, Some(&expected)).unwrap();
@@ -724,7 +725,7 @@ impl fabr_agent::Model for CancelsMidRun {
         edit(&self.path, |r| r.requests.cancel = true);
         let call = |name: &str| fabr_agent::ToolUse {
             id: name.into(),
-            call: ToolCall { name: "write_file".into(), path: name.into(), content: Some("x".into()) },
+            call: ToolCall { name: "write_file".into(), path: name.into(), content: Some("x".into()), params: None },
         };
         Ok(fabr_agent::ExecuteTurn {
             outcome: fabr_agent::TurnOutcome::Tools(vec![call("first.md"), call("second.md")]),
@@ -777,6 +778,7 @@ fn a_hung_check_is_killed_and_counted_as_a_stage_error() {
             assumptions: vec![],
             checks: vec![taskrec::Check { cmd: "tail".into(), args: vec!["-f".into(), "greet.md".into()] }],
             requires: Default::default(),
+            bound_actions: Vec::new(),
         });
     });
     let model = ScriptedModel::new(greet_plan(), vec![]);
@@ -1062,7 +1064,7 @@ fn run_to_approval(ws: &Workspace, fabric: &Path, model: &impl fabr_agent::Model
 }
 
 fn tool(name: &str, path: &str, content: Option<&str>) -> ToolCall {
-    ToolCall { name: name.into(), path: path.into(), content: content.map(str::to_string) }
+    ToolCall { name: name.into(), path: path.into(), content: content.map(str::to_string), params: None }
 }
 
 fn judged(id: &str, j: fabr_agent::Judgement, evidence: &str) -> fabr_agent::JudgedItem {

@@ -15,6 +15,32 @@ pub fn reserved_name(name: &str) -> bool {
     name == ".fabr" || name == ".fabric-space"
 }
 
+/// Sponsor writes fail closed. A symlink is not followed, even when it stays inside the node.
+pub fn reject_symlink(root: &Path, rel: &str) -> Result<(), String> {
+    if rel.is_empty() || rel.contains('\0') || Path::new(rel).is_absolute() {
+        return Err("path is not authorized".into());
+    }
+    let mut cur = root.to_path_buf();
+    for comp in Path::new(rel).components() {
+        match comp {
+            Component::CurDir => {}
+            Component::Normal(name) => {
+                let name = name.to_string_lossy();
+                if reserved_name(&name) {
+                    return Err("path is reserved".into());
+                }
+                let next = cur.join(name.as_ref());
+                if std::fs::symlink_metadata(&next).is_ok_and(|meta| meta.file_type().is_symlink()) {
+                    return Err("symlinked path is not authorized".into());
+                }
+                cur = next;
+            }
+            _ => return Err("path is not authorized".into()),
+        }
+    }
+    Ok(())
+}
+
 impl Sandbox {
     pub fn new(node_dir: &Path) -> Result<Sandbox, String> {
         let root = node_dir.canonicalize().map_err(|e| format!("node root: {e}"))?;

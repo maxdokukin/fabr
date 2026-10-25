@@ -114,7 +114,7 @@ mod tests {
     }
 
     fn run(node: &Path, name: &str, path: &str, content: Option<&str>) -> ToolOutcome {
-        DemoTools.call(node, &ToolCall { name: name.into(), path: path.into(), content: content.map(str::to_string) })
+        DemoTools.call(node, &ToolCall { name: name.into(), path: path.into(), content: content.map(str::to_string), params: None })
     }
 
     #[test]

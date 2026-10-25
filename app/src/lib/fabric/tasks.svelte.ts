@@ -5,7 +5,7 @@ import type { Source } from '../api/types';
 import type { AnswerInput } from './answer';
 import { submitApproval, type ApprovalDecision } from './approval';
 import { BACKEND_LABEL, backendState, heartbeatOf, type BackendState } from './backend';
-import { loadReadPosition, parseEvents, reconcileReadPosition, saveReadPosition, unreadCount, type FabricEvent } from './events';
+import { loadReadPosition, parseEvents, reconcileReadPosition, safeReadPosition, saveReadPosition, unreadCount, type FabricEvent } from './events';
 import { folderName, folderOf, nodeFolder, type Entry } from './folder';
 import { createFabricSource } from './live';
 import { RemoteSource, type RemoteApi } from './remote-source';
@@ -18,7 +18,7 @@ import type { CreateFields, FabricSource } from './source';
 import { minuteOf } from '../model';
 import { isActive, phaseOf, type Phase } from './phase';
 import { buildAgents, leadOf, sortAgents, type AgentView } from './stage';
-import { entryMap, findByTaskPath, loadRegistry } from './view';
+import { entryMap, findByTaskPath, loadRegistry, samePath } from './view';
 import { submitAnswer } from './write';
 import type { RegistryEntry } from './agents';
 
@@ -39,6 +39,19 @@ export function remoteSources(sources: Source[] | undefined): Source[] {
   return (sources ?? []).filter((s) => !!s.host);
 }
 
+const trimSlash = (p: string) => p.replace(/\/+$/, '');
+
+// Path-segment-aware containment: canonical `path` lives at or beneath canonical `root`.
+// Both are compared trailing-slash-trimmed so `/a/proj` is under `/a/proj` and `/a/proj/x`
+// but not under `/a/project`.
+export function under(root: string, path: string): boolean {
+  const r = trimSlash(root);
+  const p = trimSlash(path);
+  return p === r || p.startsWith(`${r}/`);
+}
+
+export type Scope = { workerRoot: string | null; openedRoots: string[]; outOfScope: Held[] };
+
 interface Slice { records: Held[]; registry: RegistryEntry[]; events: FabricEvent[]; errors: string[] }
 interface Remote extends Slice { adapter: RemoteSource; sig: string; stamp: string; busy: boolean }
 
@@ -56,6 +69,12 @@ export class FabricStore {
   openPath = $state<string | null>(null);
   openReadonly = $state(false);
   home = $state<string | null>(null);
+  workerRoot = $state<string | null>(null);
+  openedRoots = $state<string[]>([]);
+  // Records discovered on disk that failed to parse, keyed by absolute path -> parse error.
+  // A notice may point at one of these: the file IS on disk, it just could not be read, which
+  // is a different (and recoverable) situation than a genuinely missing record.
+  unreadable = $state<Map<string, string>>(new Map());
   onItemsChange: (() => void) | null = null;
 
   #source: FabricSource | null = null;
@@ -107,6 +126,31 @@ export class FabricStore {
   agentList = $derived(sortAgents([...this.agents.values()]));
   openRecord = $derived(this.records.find((h) => h.path === this.openPath) ?? null);
 
+  // Read-only scope summary the toolbar/banner can read. `outOfScope` is the set of loaded
+  // records whose folder is not under any opened root. With no opened roots there is nothing
+  // to compare against, so it is empty (an injected-source/test run captures no scope).
+  scope = $derived.by<Scope>(() => {
+    const workerRoot = this.workerRoot;
+    const openedRoots = this.openedRoots;
+    const outOfScope = openedRoots.length
+      ? this.records.filter((h) => !openedRoots.some((r) => under(r, folderOf(h.path))))
+      : [];
+    return { workerRoot, openedRoots, outOfScope };
+  });
+
+  // The worker's presence (heartbeat/registry) lives under a space other than the opened
+  // project when a registry entry drives a record whose folder is not under any opened root.
+  // Observable from the registry paths that `listRegistry` returns; no record writes.
+  presenceElsewhere = $derived.by<boolean>(() => {
+    const roots = this.openedRoots;
+    if (!roots.length) return false;
+    return this.registry.some((e) => {
+      const held = findByTaskPath(this.records, e.task_path);
+      const folder = held ? folderOf(held.path) : folderOf(e.task_path);
+      return !roots.some((r) => under(r, folder));
+    });
+  });
+
   #sourceIds(): (string | null)[] {
     return [null, ...this.#remotes.keys()];
   }
@@ -138,12 +182,14 @@ export class FabricStore {
   async start(treeRoots: string[] = [], sources: Source[] = []): Promise<void> {
     if (this.#timer) return;
     this.#dead = false;
+    this.openedRoots = treeRoots.map(trimSlash);
     this.#timer = setInterval(() => void this.tick(), 1000);
     this.setSources(sources);
     try {
       if (!this.#source) {
         const api = await createApi();
         const settings = await api.fabricSettingsRead();
+        this.workerRoot = settings.exists ? trimSlash(settings.settings.default_folder) : null;
         this.#source = await createFabricSource(settings, treeRoots);
         if (isTauri()) this.home = (await (await import('@tauri-apps/api/path')).homeDir()).replace(/\/+$/, '');
         else this.home = await api.fabricHome().then((h) => h.replace(/\/+$/, ''), () => null);
@@ -229,10 +275,16 @@ export class FabricStore {
     if (!src) return;
     const ok: Held[] = [];
     const bad: string[] = [];
+    const unreadable = new Map<string, string>();
     for (const { path, text } of await src.listRecords()) {
       try { ok.push({ path, record: parseRecord(text), text, source: null }); }
-      catch (e) { bad.push(`${folderName(folderOf(path))}: ${(e as Error).message}`); }
+      catch (e) {
+        const reason = (e as Error).message;
+        bad.push(`${folderName(folderOf(path))}: ${reason}`);
+        unreadable.set(path, reason);
+      }
     }
+    this.unreadable = unreadable;
     this.#local = { ...this.#local, records: ok, errors: bad };
     this.#publish();
     const sig = itemsSig(this.records, minuteOf(this.now));
@@ -306,14 +358,31 @@ export class FabricStore {
     return findByTaskPath(this.records, taskPath);
   }
 
+  // The parse error for a record that IS on disk but failed to load, or null when the path is
+  // not among the unreadable records. Lets a notice distinguish "exists but unreadable" from
+  // "genuinely missing" so the user gets an accurate, recoverable message.
+  unreadableReason(taskPath: string): string | null {
+    for (const [path, reason] of this.unreadable) {
+      if (samePath(path, taskPath)) return reason;
+    }
+    return null;
+  }
+
   open(path: string | null, readonly = false): void {
     this.openPath = path;
     this.openReadonly = path !== null && readonly;
     this.actionError = null;
   }
 
+  // Advance the local read position, but never past a still-actionable unread event so a
+  // required action is never hidden by mark-read (Bug B, 2.4). An event is still actionable when
+  // its resolved target record is waiting or has a pending approval. Touches only local
+  // read-position state — no record writes (preserves 3.4).
   markAllRead(): void {
-    this.readPosition = this.events.length;
+    this.readPosition = safeReadPosition(this.events, this.readPosition, (e) => {
+      const record = this.locate(e.taskPath)?.record;
+      return !!record && (record.waiting || record.approval?.status === 'pending');
+    });
     saveReadPosition(this.#eventsKey, this.readPosition);
   }
 

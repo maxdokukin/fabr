@@ -42,8 +42,19 @@ impl Harness {
     }
 
     pub fn missing(&self, meta: &PlanMeta) -> Option<String> {
+        self.missing_with(meta, &[])
+    }
+
+    pub fn missing_with(&self, meta: &PlanMeta, also: &[String]) -> Option<String> {
         let need = requires_of(meta);
-        let have = self.effective();
+        let mut have = self.effective();
+        if self.mode == ExecuteMode::Full {
+            for name in also {
+                if !have.tools.contains(name) {
+                    have.tools.push(name.clone());
+                }
+            }
+        }
         let lacks = |wanted: &[String], got: &[String]| -> Vec<String> { wanted.iter().filter(|w| !got.contains(w)).cloned().collect() };
         let tools = lacks(&need.tools, &have.tools);
         let checks = lacks(&need.checks, &have.checks);

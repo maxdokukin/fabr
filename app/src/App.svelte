@@ -15,7 +15,6 @@
   import AgentsScreen from './lib/fabric/AgentsScreen.svelte';
   import NoticesList from './lib/fabric/NoticesList.svelte';
   import { FabricStore, localRoots } from './lib/fabric/tasks.svelte';
-  import { folderOf } from './lib/fabric/folder';
   import Button from './lib/ui/Button.svelte';
   import Sheet from './lib/ui/Sheet.svelte';
   import Toolbar from './lib/Toolbar.svelte';
@@ -90,16 +89,22 @@
   $effect(() => { if (fabric) fabric.agentReason = agentReason; });
 
   function openNotice(taskPath: string) {
+    // `locate` is redelegation/path-form aware (view.ts findByTaskPath): `held` is the live target.
     const held = fabric?.locate(taskPath);
-    const folder = held ? folderOf(held.path) : null;
-    const node = folder && store ? [...store.byKey.values()].find((n) => fabric!.folderFor(store!.sourceOf(n.source), n.path) === folder) : undefined;
-    if (!held || !node) {
-      noticeError = held ? 'That folder is not in the tree.' : `No record found for ${taskPath}.`;
+    if (!held) {
+      // Distinguish a record that is on disk but failed to parse (recoverable: fix the file)
+      // from one that is genuinely missing — both are recoverable, never a silent dead-end.
+      const reason = fabric?.unreadableReason(taskPath);
+      noticeError = reason
+        ? `This record is on disk but could not be read (${reason}). Fix the file, then rescan.`
+        : `No record on disk for ${taskPath}. Try rescanning or check the folder.`;
       return;
     }
     noticeError = null;
     noticesOpen = false;
     agentsOpen = false;
+    // TaskSheet mounts the open record from fabric.openPath regardless of whether a tree node
+    // hosts its folder, so opening the resolved record is never a dead-end (Bug B, 2.1/2.4).
     fabric!.open(held.path);
   }
 
@@ -155,7 +160,7 @@
       <div class="app__bar" bind:clientHeight={toolbarH}>
         <Toolbar bind:this={toolbar} {store} onrescan={rescan} onexpand={expandAll} oncollapse={collapseAll} onsearchenter={() => treeView?.nextMatch()} {fabric} onnotices={() => { noticeError = null; noticesOpen = true; }} onagents={() => { noticeError = null; agentsOpen = true; }} />
       </div>
-      <Notice {store} insetTop={toolbarH} />
+      <Notice {store} {fabric} insetTop={toolbarH} />
       {#if needsOnboarding(store.tree)}
         <Onboarding {store} />
       {:else if store.view === 'tree'}
@@ -176,8 +181,9 @@
   <AddNodesSheet {store} />
   {#if fabric}
     <TaskSheet {fabric} />
+    {@const nf = fabric}
     <Sheet open={noticesOpen} title="Notices" onclose={() => (noticesOpen = false)}>
-      <NoticesList events={fabric.events} readPosition={fabric.readPosition} titleFor={fabric.titleFor} onopen={openNotice} onmarkallread={() => fabric?.markAllRead()} />
+      <NoticesList events={fabric.events} readPosition={fabric.readPosition} titleFor={fabric.titleFor} outOfScope={(p: string) => { const h = nf.locate(p); return !!h && nf.scope.outOfScope.includes(h); }} onopen={openNotice} onmarkallread={() => fabric?.markAllRead()} />
       {#if noticeError}<p class="gate-note" role="alert">{noticeError}</p>{/if}
       {#snippet footer()}<Button variant="tint" onclick={() => (noticesOpen = false)}>Close</Button>{/snippet}
     </Sheet>

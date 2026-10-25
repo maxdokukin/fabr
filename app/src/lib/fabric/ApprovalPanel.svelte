@@ -107,6 +107,14 @@
             <p class="warn" role="alert" data-testid="irreversible">Irreversible: once this runs it cannot be undone.</p>
           {:else}<p class="txt">reversible</p>{/if}
           <p class="dim">tools: {planMeta.tools.join(', ') || 'none'}</p>
+          {#if planMeta.bound_actions?.length}
+            <h4>Bound actions</h4>
+            <ul class="list" data-testid="bound-actions">
+              {#each planMeta.bound_actions as a, i (i)}
+                <li><b>{a.tool}</b> {a.destination} · {a.effect} · {a.grant_class}</li>
+              {/each}
+            </ul>
+          {/if}
         </section>
 
         {#if planMeta.assumptions.length}

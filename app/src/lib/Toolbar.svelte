@@ -47,6 +47,19 @@
   ]);
 
   const label = $derived(showLabel(store));
+
+  // True when the agent's search root differs from the opened workspace, or there are
+  // out-of-scope records / presence elsewhere. Derives from the store's own scope summary.
+  const scopeMismatch = $derived.by(() => {
+    if (!fabric) return false;
+    const { workerRoot, openedRoots, outOfScope } = fabric.scope;
+    const rootMismatch = workerRoot !== null && openedRoots.length > 0 && !openedRoots.some((r) => r === workerRoot);
+    return rootMismatch || outOfScope.length > 0 || fabric.presenceElsewhere;
+  });
+  const backendTitle = $derived(
+    fabric ? (fabric.workerRoot ? `${fabric.backendLabel} · searching ${fabric.workerRoot}` : fabric.backendLabel) : '',
+  );
+
   const root = $derived(store.displayRoot);
   const tally = $derived(root && store.today ? rollup(store.tallyNode(root), store.today) : null);
   const counts = $derived(tally ? countParts(tally) : null);
@@ -138,7 +151,7 @@
       <kbd class="search__kbd" aria-hidden="true">/</kbd>
     </label>
     {#if fabric}
-      <span class="backend backend--{fabric.backend}" title={fabric.backendLabel} aria-label={fabric.backendLabel} role="status"><span class="backend__dot"></span></span>
+      <span class="backend backend--{fabric.backend}" class:backend--warn={scopeMismatch} title={backendTitle} aria-label={backendTitle} role="status"><span class="backend__dot"></span></span>
       <AgentsBadge agents={fabric.agentList} onclick={onagents} />
       <NoticesBadge events={fabric.events} readPosition={fabric.readPosition} onclick={onnotices} />
     {/if}
@@ -155,4 +168,5 @@
   .backend__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--label-3); }
   .backend--connected .backend__dot { background: var(--green); }
   .backend--stale .backend__dot { background: var(--orange); }
+  .backend--warn .backend__dot { background: var(--orange); box-shadow: 0 0 0 2px color-mix(in srgb, var(--orange) 35%, transparent); }
 </style>

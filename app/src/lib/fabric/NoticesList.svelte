@@ -1,15 +1,17 @@
 <script lang="ts">
   import { isUrgent, markAllRead, taskIdOf, unreadCount, type FabricEvent } from './events';
-  let { events, readPosition, titleFor, onopen, onmarkallread }: {
+  let { events, readPosition, titleFor, outOfScope, onopen, onmarkallread }: {
     events: FabricEvent[];
     readPosition: number;
     titleFor?: (taskPath: string) => string | undefined;
+    outOfScope?: (taskPath: string) => boolean;
     onopen?: (taskPath: string) => void;
     onmarkallread?: (position: number) => void;
   } = $props();
 
   const unread = $derived(unreadCount(events, readPosition));
   const titleOf = (p: string) => titleFor?.(p) || taskIdOf(p);
+  const isOutOfScope = (p: string) => outOfScope?.(p) ?? false;
 </script>
 
 <section class="nlist" aria-label="Notices">
@@ -22,11 +24,15 @@
   {:else}
     <ul class="nlist__rows">
       {#each events as e, i (i)}
+        {@const oos = isOutOfScope(e.taskPath)}
         <li>
-          <button type="button" class="nrow nrow--{e.kind}" class:nrow--urgent={isUrgent(e.kind)} class:nrow--unread={i < unread} onclick={() => onopen?.(e.taskPath)}>
+          <button type="button" class="nrow nrow--{e.kind}" class:nrow--urgent={isUrgent(e.kind)} class:nrow--unread={i < unread} class:nrow--oos={oos} onclick={() => onopen?.(e.taskPath)}>
             <span class="nrow__kind">{e.kind}</span>
             <time class="nrow__time" datetime={e.at}>{e.at}</time>
-            <span class="nrow__title">{titleOf(e.taskPath)}</span>
+            <span class="nrow__title">
+              {titleOf(e.taskPath)}
+              {#if oos}<span class="nrow__tag" data-testid="oos-tag">out of scope</span>{/if}
+            </span>
             <span class="nrow__text">{e.text}</span>
           </button>
         </li>
@@ -49,6 +55,8 @@
   .nrow--urgent .nrow__kind { color: var(--orange); }
   .nrow--failed .nrow__kind { color: var(--red); }
   .nrow__time { color: var(--label-3); }
+  .nrow--oos { border-left-color: var(--label-3); }
   .nrow__title { grid-column: 1 / -1; }
+  .nrow__tag { margin-left: 6px; padding: 0 4px; border-radius: 3px; background: var(--fill); color: var(--label-3); font-size: var(--fs-12); font-weight: 400; text-transform: uppercase; letter-spacing: 0.04em; }
   .nrow__text { grid-column: 1 / -1; font-weight: 400; color: var(--label-2); }
 </style>

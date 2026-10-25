@@ -22,3 +22,4 @@ serde_yaml.workspace = true
 fabr-core.workspace = true
 tempfile.workspace = true
 tiny_http.workspace = true
+proptest = "1"

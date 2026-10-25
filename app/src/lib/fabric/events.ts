@@ -41,6 +41,32 @@ export function markAllRead(events: FabricEvent[]): number {
   return events.length;
 }
 
+// Newest read position that does not strand a still-actionable unread event.
+//
+// `events` is newest-first and `readPosition` counts read events from the newest end, so the
+// unread region is the prefix `events[0 .. unreadCount)`. Keeping an unread event at index `i`
+// reachable means the new unread region must still contain index `i`, i.e. the new readPosition
+// must be `<= events.length - (i + 1)`. To keep *every* still-actionable unread event reachable
+// we pin the one with the largest index (the oldest actionable unread event): everything newer
+// than it stays unread, everything older than it (all non-actionable, since it is the oldest
+// actionable) is marked read. With no actionable unread event we mark everything read as before.
+//
+// `isActionable(e)` decides whether the event's resolved target still needs the user — a waiting
+// task or a pending approval. This is a pure function over local read-position state; it never
+// touches records.
+export function safeReadPosition(
+  events: FabricEvent[],
+  readPosition: number,
+  isActionable: (event: FabricEvent) => boolean,
+): number {
+  const unread = unreadCount(events, readPosition);
+  let oldestActionable = -1;
+  for (let i = 0; i < unread; i++) {
+    if (isActionable(events[i])) oldestActionable = i;
+  }
+  return oldestActionable < 0 ? events.length : events.length - (oldestActionable + 1);
+}
+
 export function isUrgent(kind: EventKind): boolean {
   return kind === 'waiting' || kind === 'stuck';
 }
