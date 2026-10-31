@@ -415,7 +415,7 @@ fn ten_fixtures_one_stage_matches_fabric_updated_at() {
         let text = std::fs::read_to_string(&fixture).unwrap();
         let original = taskrec::parse(&text).unwrap_or_else(|e| panic!("{}: {}", fixture.display(), e.message()));
         assert!(text.starts_with("---\nschema: 4\n"), "{}", fixture.display());
-        assert_eq!((original.schema, original.pri), (6, 0), "{}", fixture.display());
+        assert_eq!((original.schema, original.pri), (7, 0), "{}", fixture.display());
         assert!(original.source.is_none(), "{}", fixture.display());
         assert_eq!(fabric::updated_at(&text), original.updated_at, "{}", fixture.display());
 

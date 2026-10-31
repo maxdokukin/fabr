@@ -221,6 +221,7 @@ fn write_records(node: &Path, todos: &[Todo], today: chrono::NaiveDate) -> io::R
             links: Links { redelegated_from: None, redelegated_to: None },
             by: Default::default(),
             needs: None,
+            sessions: Default::default(),
             context: String::new(),
             spec: String::new(),
             success: String::new(),

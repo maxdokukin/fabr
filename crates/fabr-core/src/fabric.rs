@@ -458,7 +458,7 @@ pub(crate) fn render_new(req: &FabricCreateReq, nt: &NewTask, id: &str, now: chr
     let stamp = now.format("%Y-%m-%dT%H:%M:%SZ");
     let pri = nt.pri;
     format!(
-        "---\nschema: 6\nid: {id}\nsource: null\ntitle: {}\ndue: {}\npri: {pri}\nstate: reminder\nstep: null\nwaiting: false\npaused: false\nsuspended: false\nsuspend_until: null\ncreated_at: {stamp}\nupdated_at: {stamp}\nrequests: {{delegate: false, cancel: false, redelegate: false, pause: false, resume: false, complete: false, redo: null}}\nquestion: null\nanswers: []\ngrants: {{requested: [], granted: []}}\nplan_meta: null\nassertions: []\napproval: null\nverdict: null\ncost_usd: 0\nlinks: {{redelegated_from: null, redelegated_to: null}}\nby: {{context: null, spec: null, success: null, plan: null}}\nneeds: null\n---\n## Context\n{}## Spec\n{}## Success\n{}## Plan\n## Log\n",
+        "---\nschema: 7\nid: {id}\nsource: null\ntitle: {}\ndue: {}\npri: {pri}\nstate: reminder\nstep: null\nwaiting: false\npaused: false\nsuspended: false\nsuspend_until: null\ncreated_at: {stamp}\nupdated_at: {stamp}\nrequests: {{delegate: false, cancel: false, redelegate: false, pause: false, resume: false, complete: false, redo: null}}\nquestion: null\nanswers: []\ngrants: {{requested: [], granted: []}}\nplan_meta: null\nassertions: []\napproval: null\nverdict: null\ncost_usd: 0\nlinks: {{redelegated_from: null, redelegated_to: null}}\nby: {{context: null, spec: null, success: null, plan: null}}\nneeds: null\nsessions: {{plan: null, execute: null, evaluate: null}}\n---\n## Context\n{}## Spec\n{}## Success\n{}## Plan\n## Log\n",
         yaml_title(&nt.title),
         nt.due.as_deref().unwrap_or("null"),
         section_text(&req.context),
@@ -847,7 +847,7 @@ mod tests {
         };
         let r = create_in(&req, d.path()).unwrap();
         let text = read(&FabricReadReq { path: r.path.clone() }).unwrap().text;
-        assert!(text.starts_with("---\nschema: 6\n"));
+        assert!(text.starts_with("---\nschema: 7\n"));
         assert_eq!(updated_at(&text).len(), 20);
         assert!(text.contains(&format!("id: {}\n", r.id)));
         assert!(text.contains("title: \"order: \\\"filament\\\"\"\ndue: null\npri: 0\nstate: reminder\nstep: null\nwaiting: false\n"));
@@ -960,7 +960,7 @@ mod tests {
         let req = FabricCreateReq { due: Some("2026-10-28T09:30".into()), pri: Some(3), ..create_req(d.path(), "call the bank") };
         let made = create_in(&req, d.path()).unwrap();
         let rec = taskrec::parse(&read(&FabricReadReq { path: made.path }).unwrap().text).unwrap();
-        assert_eq!((rec.schema, rec.pri, rec.due.as_deref(), rec.state), (6, 3, Some("2026-10-28T09:30"), State::Reminder));
+        assert_eq!((rec.schema, rec.pri, rec.due.as_deref(), rec.state), (7, 3, Some("2026-10-28T09:30"), State::Reminder));
         for bad in ["2026-10-28T25:00", "2026-10-28T9:30", "2026-10-28 09:30"] {
             let r = create_in(&FabricCreateReq { due: Some(bad.into()), ..create_req(d.path(), "x") }, d.path());
             assert!(matches!(r, Err(FabrError::BadRequest(_))), "{bad}");

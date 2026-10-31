@@ -613,6 +613,7 @@ impl Runner {
                     links: Links { redelegated_from: Some(task_path_key(path)), redelegated_to: None },
                     by: Default::default(),
                     needs: None,
+                    sessions: Default::default(),
                     context: old.context.clone(),
                     spec: String::new(),
                     success: String::new(),

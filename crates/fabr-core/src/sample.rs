@@ -138,6 +138,7 @@ fn base(c: &Clock, title: &str, created: i64, state: State) -> TaskRecord {
         links: Links { redelegated_from: None, redelegated_to: None },
         by: Default::default(),
         needs: None,
+        sessions: Default::default(),
         context: String::new(),
         spec: String::new(),
         success: String::new(),

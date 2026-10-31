@@ -120,6 +120,22 @@ pub struct By {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sessions {
+    #[serde(default)]
+    pub plan: Option<String>,
+    #[serde(default)]
+    pub execute: Option<String>,
+    #[serde(default)]
+    pub evaluate: Option<String>,
+}
+
+impl Sessions {
+    pub fn is_empty(&self) -> bool {
+        self.plan.is_none() && self.execute.is_none() && self.evaluate.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanRequires {
     #[serde(default)]
     pub tools: Vec<String>,
@@ -310,6 +326,8 @@ pub struct FrontMatter {
     pub by: By,
     #[serde(default)]
     pub needs: Option<String>,
+    #[serde(default)]
+    pub sessions: Sessions,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -340,6 +358,7 @@ pub struct TaskRecord {
     pub links: Links,
     pub by: By,
     pub needs: Option<String>,
+    pub sessions: Sessions,
     pub context: String,
     pub spec: String,
     pub success: String,
@@ -347,7 +366,7 @@ pub struct TaskRecord {
     pub log: String,
 }
 
-pub const SCHEMA: i64 = 6;
+pub const SCHEMA: i64 = 7;
 
 pub fn valid_due(s: &str) -> bool {
     match s.len() {
@@ -365,7 +384,7 @@ pub fn parse(text: &str) -> Result<TaskRecord, FabrError> {
     let yaml = &rest[..end];
     let body = rest[end + 4..].strip_prefix('\n').unwrap_or(&rest[end + 4..]);
     let fm: FrontMatter = serde_yaml::from_str(yaml).map_err(|e| FabrError::Unprocessable(format!("front matter: {e}")))?;
-    if !matches!(fm.schema, 2..=6) {
+    if !matches!(fm.schema, 2..=7) {
         return Err(FabrError::Unprocessable(format!("unsupported record schema {}", fm.schema)));
     }
     if fm.pri > 3 {
@@ -399,6 +418,7 @@ pub fn parse(text: &str) -> Result<TaskRecord, FabrError> {
         links: fm.links,
         by: fm.by,
         needs: fm.needs,
+        sessions: fm.sessions,
         context: sections.remove("Context").unwrap_or_default(),
         spec: sections.remove("Spec").unwrap_or_default(),
         success: sections.remove("Success").unwrap_or_default(),
@@ -457,6 +477,7 @@ pub fn render(rec: &TaskRecord) -> String {
         links: rec.links.clone(),
         by: rec.by.clone(),
         needs: rec.needs.clone(),
+        sessions: rec.sessions.clone(),
     };
     let yaml = serde_yaml::to_string(&fm).unwrap_or_default();
     let mut out = String::from("---\n");
@@ -677,9 +698,9 @@ mod tests {
         for path in recs {
             let text = std::fs::read_to_string(&path).unwrap();
             let rec = parse(&text).unwrap_or_else(|e| panic!("{}: {}", path.display(), e.message()));
-            assert_eq!(rec.schema, 6, "{}", path.display());
+            assert_eq!(rec.schema, 7, "{}", path.display());
             assert_eq!(rec.pri, 0, "{}", path.display());
-            assert!(render(&rec).starts_with("---\nschema: 6\n"), "{}", path.display());
+            assert!(render(&rec).starts_with("---\nschema: 7\n"), "{}", path.display());
             assert!(!rec.id.is_empty(), "{}", path.display());
         }
     }
@@ -695,7 +716,7 @@ mod tests {
                 .replace(", pause: false, resume: false", "");
         assert!(text.starts_with("---\nschema: 2\n"));
         let rec = parse(&text).unwrap();
-        assert_eq!((rec.schema, rec.pri), (6, 0));
+        assert_eq!((rec.schema, rec.pri), (7, 0));
         assert!(
             !rec.paused
                 && !rec.suspended
@@ -709,14 +730,14 @@ mod tests {
         let out = render(&rec);
         assert!(out.contains("\nneeds: null\n") && out.contains("\nby:\n  context: null\n"));
         assert!(
-            out.starts_with("---\nschema: 6\n")
+            out.starts_with("---\nschema: 7\n")
                 && out.contains("\npri: 0\n")
                 && out.contains("\npaused: false\nsuspended: false\nsuspend_until: null\n")
         );
         let mut rec = rec;
         rec.pri = 2;
         assert_eq!(parse(&render(&rec)).unwrap().pri, 2);
-        assert!(parse(&text.replacen("schema: 2", "schema: 7", 1)).is_err());
+        assert!(parse(&text.replacen("schema: 2", "schema: 8", 1)).is_err());
         assert!(parse(&text.replacen("schema: 2\n", "schema: 6\npri: 4\n", 1)).is_err());
     }
 
