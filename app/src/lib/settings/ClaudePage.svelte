@@ -6,7 +6,7 @@
   import Segmented from '../ui/Segmented.svelte';
   import ClaudeFields from '../setup/ClaudeFields.svelte';
   import Switch from '../ui/Switch.svelte';
-    import type { ExecuteMode } from '../api/types';
+  import type { ExecuteMode } from '../api/types';
   import type { SettingsController } from './controller.svelte';
 
   let { ctl }: { ctl: SettingsController } = $props();
@@ -15,6 +15,8 @@
   let model = $state('');
   let effort = $state('');
   let auto = $state(false);
+  let replan = $state(true);
+  let propose = $state(true);
   let execute = $state<ExecuteMode>('full');
   const MODES: { value: ExecuteMode; label: string }[] = [{ value: 'full', label: 'Full' }, { value: 'read_only', label: 'Read-only' }, { value: 'off', label: 'Off' }];
   const HELP: Record<ExecuteMode, string> = { full: 'This machine runs tasks to the end, with tools and checks.', read_only: 'This machine defines, plans and gates tasks but never executes them.', off: 'The agent does not run on this machine.' };
@@ -25,6 +27,8 @@
     model = p.settings?.model ?? '';
     effort = p.settings?.effort ?? '';
     auto = p.settings?.auto_mode ?? false;
+    replan = p.settings?.replan_on_fail ?? true;
+    propose = p.settings?.propose_procedures ?? true;
     execute = p.settings?.execute ?? 'full';
   });
 
@@ -54,6 +58,8 @@
 <Group header="Limits" footer={p.limitsError ?? 'A run stops when it reaches the spend cap or the time limit.'} error={!!p.limitsError}>
   <NumField label="Spend cap per run (USD, 0 = none)" mode="decimal" bad={!!p.limitsError} bind:value={p.budgetUsdText} oncommit={() => p.saveLimits()} />
   <NumField label="Run time limit (minutes)" mode="numeric" bad={!!p.limitsError} bind:value={p.timeoutMinText} oncommit={() => p.saveLimits()} />
+  <Row label="Re-plan once when the check fails"><Switch label="Re-plan once when the check fails" bind:checked={replan} onchange={(v) => p.write({ replan_on_fail: v })} /></Row>
+  <Row label="Suggest reusable procedures after a task passes"><Switch label="Suggest reusable procedures after a task passes" bind:checked={propose} onchange={(v) => p.write({ propose_procedures: v })} /></Row>
 </Group>
 
 <Group header="Machine" footer="{HELP[execute]} The runner detects tools and checks and refreshes them when it starts.">
@@ -67,3 +73,9 @@
 </Group>
 
 {#if p.error}<div class="banner banner--error page-panel" role="alert">{p.error}</div>{/if}
+
+<style>
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+  .chip { padding: 1px 8px; border-radius: 999px; background: var(--fill-3); font-size: var(--fs-12); overflow-wrap: anywhere; }
+  .chip--none { color: var(--label-2); }
+</style>

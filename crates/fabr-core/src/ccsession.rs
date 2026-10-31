@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 const TITLE_CHARS: usize = 80;
 const TEXT_CHARS: usize = 2000;
 const TOOL_CHARS: usize = 160;
+const PROMPT_CHARS: usize = 300;
+const REPLY_CHARS: usize = 800;
+const DIGEST_CHARS: usize = 3000;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionSummary {
@@ -17,6 +20,25 @@ pub struct SessionSummary {
     pub modified_at: String,
     pub messages: usize,
     pub bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<SessionTask>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionTask {
+    pub title: String,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TrackReq {
+    pub folder: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackRes {
+    pub path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -93,6 +115,7 @@ pub fn list(config: &Path, folder: &Path) -> Result<Vec<SessionSummary>, FabrErr
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.into()),
     };
+    let linked = linked_tasks(folder);
     let mut out = Vec::new();
     for ent in rd.flatten() {
         let name = ent.file_name().to_string_lossy().to_string();
@@ -108,7 +131,14 @@ pub fn list(config: &Path, folder: &Path) -> Result<Vec<SessionSummary>, FabrErr
             .ok()
             .map(|t| chrono::DateTime::<chrono::Utc>::from(t).format("%Y-%m-%dT%H:%M:%SZ").to_string())
             .unwrap_or_default();
-        out.push(SessionSummary { id: id.to_string(), title: scan.title, modified_at, messages: scan.messages, bytes: meta.len() });
+        out.push(SessionSummary {
+            id: id.to_string(),
+            title: scan.title,
+            modified_at,
+            messages: scan.messages,
+            bytes: meta.len(),
+            task: linked.get(id).cloned(),
+        });
     }
     out.sort_by(|a, b| b.modified_at.cmp(&a.modified_at).then_with(|| a.id.cmp(&b.id)));
     Ok(out)
@@ -158,13 +188,100 @@ pub fn resolve_bin(configured: &str) -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join(&name)).find(|p| p.is_file())
 }
 
+fn task_files(folder: &Path) -> Vec<(PathBuf, crate::taskrec::TaskRecord)> {
+    let Ok(rd) = std::fs::read_dir(folder.join(".fabric-space").join("tasks")) else { return Vec::new() };
+    let mut paths: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "md")).collect();
+    paths.sort();
+    paths.into_iter().filter_map(|p| Some((p.clone(), crate::taskrec::parse(&std::fs::read_to_string(&p).ok()?).ok()?))).collect()
+}
+
+fn roles(rec: &crate::taskrec::TaskRecord) -> [(&'static str, &Option<String>); 3] {
+    [("plan", &rec.sessions.plan), ("execute", &rec.sessions.execute), ("evaluate", &rec.sessions.evaluate)]
+}
+
+const PICKED_UP: &str = "Picked up from Claude Code session ";
+
+fn source_of(rec: &crate::taskrec::TaskRecord) -> Option<&str> {
+    rec.context.lines().next()?.strip_prefix(PICKED_UP)?.strip_suffix('.').filter(|id| valid_id(id))
+}
+
+fn linked_tasks(folder: &Path) -> std::collections::HashMap<String, SessionTask> {
+    let mut out = std::collections::HashMap::new();
+    let files = task_files(folder);
+    for (_, rec) in &files {
+        for (role, id) in roles(rec) {
+            if let Some(id) = id {
+                out.entry(id.clone()).or_insert_with(|| SessionTask { title: rec.title.clone(), role: role.into() });
+            }
+        }
+    }
+    for (_, rec) in &files {
+        if let Some(id) = source_of(rec) {
+            out.entry(id.to_string()).or_insert_with(|| SessionTask { title: rec.title.clone(), role: "source".into() });
+        }
+    }
+    out
+}
+
 fn owner(folder: &Path, id: &str) -> Option<(PathBuf, crate::taskrec::TaskRecord)> {
-    let rd = std::fs::read_dir(folder.join(".fabric-space").join("tasks")).ok()?;
-    rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "md")).find_map(|p| {
-        let rec = crate::taskrec::parse(&std::fs::read_to_string(&p).ok()?).ok()?;
-        let s = &rec.sessions;
-        [&s.plan, &s.execute, &s.evaluate].iter().any(|v| v.as_deref() == Some(id)).then_some((p, rec))
-    })
+    task_files(folder).into_iter().find(|(_, rec)| roles(rec).iter().any(|(_, v)| v.as_deref() == Some(id)))
+}
+
+pub fn track(config: &Path, folder: &Path, id: &str) -> Result<String, FabrError> {
+    let t = transcript(config, folder, id, usize::MAX)?;
+    let marker = format!("{PICKED_UP}{id}");
+    let space = folder.join(".fabric-space");
+    std::fs::create_dir_all(&space)?;
+    let lock = space.join("track.lock");
+    let held = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&lock)?;
+    held.lock().map_err(|e| FabrError::Io(format!("{}: {e}", lock.display())))?;
+    if linked_tasks(folder).contains_key(id) {
+        return Err(FabrError::Conflict { message: "This session is already tracked by a task.".into(), node: None });
+    }
+    let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let prompts: Vec<String> = t.entries.iter().filter(|e| e.role == "user").map(|e| clip(&flat(&e.text), PROMPT_CHARS)).collect();
+    let title = crate::fabric::clean_title(&if t.title.is_empty() {
+        prompts.first().map(|p| clip(p, TITLE_CHARS)).unwrap_or_default()
+    } else {
+        t.title.clone()
+    });
+    if title.is_empty() {
+        return Err(FabrError::BadRequest("this session has no prompt to track".into()));
+    }
+    let reply = t.entries.iter().rev().find(|e| e.role == "assistant").map(|e| clip(&flat(&e.text), REPLY_CHARS));
+    let mut ctx = format!("{marker}.");
+    let mut budget = DIGEST_CHARS.saturating_sub(ctx.chars().count() + REPLY_CHARS + 80);
+    let mut shown = 0;
+    for p in &prompts {
+        let line = format!("\n- {p}");
+        let n = line.chars().count();
+        if n > budget {
+            break;
+        }
+        if shown == 0 {
+            ctx.push_str("\n\nWhat was asked:");
+        }
+        budget -= n;
+        ctx.push_str(&line);
+        shown += 1;
+    }
+    if shown < prompts.len() {
+        ctx.push_str(&format!("\n- ({} more)", prompts.len() - shown));
+    }
+    if let Some(r) = reply {
+        ctx.push_str(&format!("\n\nLast reply:\n{r}"));
+    }
+    let abs = folder.canonicalize().unwrap_or_else(|_| folder.to_path_buf());
+    let req = crate::fabric::FabricCreateReq {
+        folder: abs.to_string_lossy().into_owned(),
+        title,
+        due: None,
+        pri: None,
+        context: Some(ctx),
+        spec: None,
+        success: None,
+    };
+    Ok(crate::fabric::create_in(&req, &abs)?.path)
 }
 
 pub fn send(bin: &Path, folder: &Path, id: &str, message: &str, timeout: Duration) -> Result<SendRes, FabrError> {
@@ -186,7 +303,7 @@ pub fn send(bin: &Path, folder: &Path, id: &str, message: &str, timeout: Duratio
             node: None,
         });
     }
-    let _marker = ChatMarker::take(folder, id)?;
+    let marker = ChatMarker::take(folder, id)?;
     let mut cmd = Command::new(bin);
     cmd.args([
         "-p",
@@ -205,12 +322,9 @@ pub fn send(bin: &Path, folder: &Path, id: &str, message: &str, timeout: Duratio
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
+    own_group(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| FabrError::Io(format!("could not start Claude Code ({}): {e}", bin.display())))?;
+    marker.hold(child.id());
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(message.as_bytes());
     }
@@ -258,17 +372,79 @@ struct ChatMarker(PathBuf);
 impl ChatMarker {
     fn take(folder: &Path, id: &str) -> Result<ChatMarker, FabrError> {
         let path = chat_marker(folder, id);
-        if let Some(pid) = std::fs::read_to_string(&path).ok().and_then(|t| t.trim().parse::<u32>().ok())
-            && pid_alive(pid)
-        {
-            return Err(FabrError::Conflict { message: "A chat with this session is already running.".into(), node: None });
-        }
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(&path, std::process::id().to_string())?;
-        Ok(ChatMarker(path))
+        for _ in 0..2 {
+            let tmp = pid_file(&path, std::process::id())?;
+            let linked = std::fs::hard_link(tmp.path(), &path).or_else(|e| match e.kind() {
+                std::io::ErrorKind::AlreadyExists => Err(e),
+                _ => std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .and_then(|mut f| f.write_all(std::process::id().to_string().as_bytes())),
+            });
+            match linked {
+                Ok(()) => return Ok(ChatMarker(path)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let pid = std::fs::read_to_string(&path).ok().and_then(|t| t.trim().parse::<u32>().ok());
+                    if pid.map_or_else(|| marker_fresh(&path), pid_alive) {
+                        return Err(FabrError::Conflict { message: "A chat with this session is already running.".into(), node: None });
+                    }
+                    let _ = std::fs::remove_file(&path);
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(FabrError::Conflict { message: "A chat with this session is already running.".into(), node: None })
     }
+
+    fn hold(&self, pid: u32) {
+        if let Ok(tmp) = pid_file(&self.0, pid) {
+            let _ = tmp.persist(&self.0);
+        }
+    }
+}
+
+fn pid_file(marker: &Path, pid: u32) -> Result<tempfile::NamedTempFile, FabrError> {
+    let mut tmp = tempfile::NamedTempFile::new_in(marker.parent().unwrap_or(Path::new(".")))?;
+    tmp.write_all(pid.to_string().as_bytes())?;
+    Ok(tmp)
+}
+
+pub fn marker_fresh(marker: &Path) -> bool {
+    std::fs::metadata(marker).and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age < Duration::from_secs(10)))
+}
+
+pub fn own_group(cmd: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        let parent = std::process::id();
+        // SAFETY: the hook runs between fork and exec and only calls prctl(2), getppid(2) and _exit(2), which are async-signal-safe.
+        unsafe {
+            cmd.pre_exec(move || {
+                unsafe extern "C" {
+                    fn prctl(option: i32, ...) -> i32;
+                    fn getppid() -> i32;
+                    fn _exit(code: i32) -> !;
+                }
+                prctl(1, 15 as std::ffi::c_ulong);
+                if u32::try_from(getppid()).ok() != Some(parent) {
+                    _exit(1);
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = cmd;
 }
 
 impl Drop for ChatMarker {
@@ -547,11 +723,123 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_marker_is_busy_while_fresh_and_stale_after_ten_seconds() {
+        let d = tempfile::tempdir().unwrap();
+        let bin = fake_bin(d.path(), "cat > /dev/null; echo '{\"result\":\"ok\",\"is_error\":false}'");
+        let m = chat_marker(d.path(), ID);
+        std::fs::create_dir_all(m.parent().unwrap()).unwrap();
+        std::fs::write(&m, "").unwrap();
+        assert!(matches!(send(&bin, d.path(), ID, "hi", Duration::from_secs(10)), Err(FabrError::Conflict { .. })));
+        let old = std::time::SystemTime::now() - Duration::from_secs(60);
+        std::fs::File::options().write(true).open(&m).unwrap().set_modified(old).unwrap();
+        assert!(send(&bin, d.path(), ID, "hi", Duration::from_secs(10)).is_ok());
+        assert!(!m.exists());
+        let held = ChatMarker::take(d.path(), ID).unwrap();
+        assert_eq!(std::fs::read_to_string(&m).unwrap(), std::process::id().to_string());
+        held.hold(42);
+        assert_eq!(std::fs::read_to_string(&m).unwrap(), "42");
+        assert_eq!(std::fs::read_dir(m.parent().unwrap()).unwrap().count(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_child_in_its_own_group_runs_as_the_group_leader() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo $$ $(cut -d' ' -f5 /proc/$$/stat)"]).stdout(Stdio::piped());
+        own_group(&mut cmd);
+        let out = String::from_utf8(cmd.output().unwrap().stdout).unwrap();
+        let ids: Vec<&str> = out.split_whitespace().collect();
+        assert!(ids.len() == 2 && ids[0] == ids[1], "{out}");
+    }
+
+    #[test]
     fn an_ai_title_wins_over_the_first_prompt() {
         let text = format!("{}\n{}", r#"{"type":"user","message":{"content":"first"}}"#, r#"{"type":"ai-title","aiTitle":"Fix the CI"}"#);
         assert_eq!(scan_lines(&text).title, "Fix the CI");
         let named = format!("{text}\n{}", r#"{"type":"custom-title","customTitle":"fabr plan: x"}"#);
         assert_eq!(scan_lines(&named).title, "fabr plan: x");
         assert_eq!(clip("abcdef", 4), "abc…");
+    }
+
+    fn record(id: &str, extra: &str, ctx: &str) -> String {
+        format!(
+            "---\nschema: 7\nid: t\ntitle: Sort scans\nstate: in_progress\nstep: execute\nrequests: {{delegate: false, cancel: false, redelegate: false}}\ngrants: {{}}\nlinks: {{}}\nsessions: {{plan: {id}, execute: null, evaluate: null}}\n{extra}---\n## Context\n{ctx}"
+        )
+    }
+
+    #[test]
+    fn list_links_a_session_to_its_task() {
+        let home = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        fixture(home.path(), folder.path());
+        assert_eq!(list(home.path(), folder.path()).unwrap()[0].task, None);
+        let tasks = folder.path().join(".fabric-space/tasks");
+        std::fs::create_dir_all(&tasks).unwrap();
+        std::fs::write(tasks.join("t.md"), record(ID, "", "")).unwrap();
+        let task = list(home.path(), folder.path()).unwrap()[0].task.clone();
+        assert_eq!(task, Some(SessionTask { title: "Sort scans".into(), role: "plan".into() }));
+    }
+
+    #[test]
+    fn track_makes_a_bounded_reminder_and_refuses_a_second_time() {
+        let home = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        fixture(home.path(), folder.path());
+        let path = track(home.path(), folder.path(), ID).unwrap();
+        let rec = crate::taskrec::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!((rec.title.as_str(), rec.state), ("Rename the scans", crate::taskrec::State::Reminder));
+        assert!(rec.sessions.plan.is_none());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(&format!("Picked up from Claude Code session {ID}.")));
+        assert!(text.contains("- Rename the scans by date") && text.contains("Last reply:\nDone."));
+        assert!(matches!(track(home.path(), folder.path(), ID), Err(FabrError::Conflict { .. })));
+        assert!(matches!(track(home.path(), folder.path(), "../x"), Err(FabrError::BadRequest(_))));
+    }
+
+    #[test]
+    fn a_tracked_session_shows_as_linked_by_its_first_context_line() {
+        let home = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        fixture(home.path(), folder.path());
+        track(home.path(), folder.path(), ID).unwrap();
+        let task = list(home.path(), folder.path()).unwrap()[0].task.clone();
+        assert_eq!(task, Some(SessionTask { title: "Rename the scans".into(), role: "source".into() }));
+        let tasks = folder.path().join(".fabric-space/tasks");
+        for e in std::fs::read_dir(&tasks).unwrap().flatten() {
+            std::fs::remove_file(e.path()).unwrap();
+        }
+        std::fs::write(tasks.join("m.md"), record("other", "", &format!("Notes\nPicked up from Claude Code session {ID}.\n"))).unwrap();
+        assert_eq!(list(home.path(), folder.path()).unwrap()[0].task, None);
+    }
+
+    #[test]
+    fn control_characters_in_a_title_never_corrupt_the_record() {
+        let home = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        let dir = project_dir(home.path(), folder.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = r#"{"type":"custom-title","customTitle":"Fix\u001b[31m red\ttab\u0085x"}"#;
+        std::fs::write(dir.join(format!("{ID}.jsonl")), format!("{}\n{line}", r#"{"type":"user","message":{"content":"hi"}}"#)).unwrap();
+        let path = track(home.path(), folder.path(), ID).unwrap();
+        let rec = crate::taskrec::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(rec.title, "Fix[31m red tabx");
+    }
+
+    #[test]
+    fn track_clips_long_prompts_and_keeps_the_digest_small() {
+        let home = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        let dir = project_dir(home.path(), folder.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut lines: Vec<String> =
+            (0..40).map(|i| format!(r#"{{"type":"user","message":{{"content":"{i} {}"}}}}"#, "word ".repeat(100))).collect();
+        lines.push(format!(r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{}"}}]}}}}"#, "z".repeat(1500)));
+        std::fs::write(dir.join(format!("{ID}.jsonl")), lines.join("\n")).unwrap();
+        let path = track(home.path(), folder.path(), ID).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let ctx = text.split("## Context\n").nth(1).unwrap().split("## Spec").next().unwrap();
+        assert!(ctx.chars().count() <= 3000, "{}", ctx.chars().count());
+        assert!(ctx.contains("more)") && ctx.contains(&format!("{}…", "z".repeat(799))));
+        assert!(ctx.lines().filter(|l| l.starts_with("- ")).all(|l| l.chars().count() <= 303));
     }
 }

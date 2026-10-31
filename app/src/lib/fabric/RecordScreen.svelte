@@ -5,7 +5,8 @@
   import Page from '../ui/Page.svelte';
   import type { AnswerInput } from './answer';
   import ApprovalPanel from './ApprovalPanel.svelte';
-  import type { ApprovalDecision } from './approval';
+  import { replanFailures, verdictIsPrevious, type ApprovalDecision } from './approval';
+  import Icon from '../ui/Icon.svelte';
   import { describeAnswer } from './answer';
   import { splitContext } from './parse';
   import QuestionPanel from './QuestionPanel.svelte';
@@ -136,6 +137,7 @@
   const q = $derived(record.question);
   const ap = $derived(record.approval);
   const pm = $derived(record.plan_meta);
+  const replan = $derived(replanFailures(record));
 </script>
 
 {#snippet sechead(slot: Section | 'assertions')}
@@ -265,7 +267,7 @@
         <div class="blk">
           <ul class="list">
             {#each record.answers as a (a.id)}
-              <li class="txt"><b>{a.id}</b> ({a.kind}) {a.text}<br /><span class="dim">{describeAnswer(a)}{#if a.answer} · by {a.answer.by} at {a.answer.at}{/if}</span></li>
+              <li class="txt"><b>{a.id}</b> ({a.kind}) {a.text}<br /><span class="dim">{describeAnswer(a)}{#if a.answer}{` · by ${a.answer.by} at ${a.answer.at}`}{/if}</span></li>
             {/each}
           </ul>
         </div>
@@ -286,6 +288,15 @@
       </div>
     </Group>
 
+    {#if replan}
+      <div class="banner" role="status" data-testid="replan-notice">
+        <Icon name="warning" size={14} class="banner__icon" />
+        <div class="banner__body">
+          <p class="banner__text">The first attempt failed a check. Here is a revised plan.</p>
+          {#if replan.length}<ul class="list">{#each replan as i (i.id)}<li class="assert"><span class="mark mark--fail">✗</span><span><b>{i.id}</b> {i.evidence}</span></li>{/each}</ul>{/if}
+        </div>
+      </div>
+    {/if}
     {#if ap && !readonly}
       <ApprovalPanel approval={ap} grants={record.grants} planMeta={pm} plan={s.plan} assertions={record.assertions} onsubmit={onapprove} {onreload} {folder} planSession={record.sessions.plan} onredo={mayRedo ? () => ask('redo_plan') : undefined} />
     {:else}
@@ -312,7 +323,7 @@
       </div>
     </Group>
 
-    <Group header="Verdict">
+    <Group header={verdictIsPrevious(record) ? 'Verdict of the first attempt' : 'Verdict'}>
       <div class="blk">
         {#if record.verdict}
           <p class="txt"><b class:warn={record.verdict.result === 'fail'}>{record.verdict.result}</b> at {record.verdict.at}</p>
@@ -351,9 +362,9 @@
   .mark--fail { color: var(--red); }
   .req { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
   .req__queued { color: var(--label-2); font-size: var(--fs-12); }
-  .req__silent { color: var(--orange); font-size: var(--fs-12); }
-  .req__err { color: var(--red); font-size: var(--fs-12); }
-  .warn { color: var(--orange); }
+  .req__silent { color: var(--warning-text); font-size: var(--fs-12); }
+  .req__err { color: var(--error-text); font-size: var(--fs-12); }
+  .warn { color: var(--warning-text); }
   .sechead { display: flex; align-items: center; justify-content: flex-end; gap: 10px; min-height: 0; }
   .prov { margin-right: auto; font-size: var(--fs-11); text-transform: uppercase; color: var(--label-3); border: 0.5px solid var(--sep); border-radius: var(--radius-pill); padding: 1px 8px; }
   .prov--you { color: var(--tint); border-color: var(--tint); }

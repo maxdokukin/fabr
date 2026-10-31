@@ -1,11 +1,13 @@
 import type { Api } from '../lib/api/index';
 import {
-  ApiError, type Meta, type Node, type NodeRef, type Settings, type Source, type TestResult, type Tree, type DirEntry, type FabricSettings, type FabricSecretsStatus, type NodeKnowledge, type KnowledgeKind, type Transcript,
+  ApiError, type Meta, type Node, type NodeRef, type Settings, type Source, type TestResult, type Tree, type DirEntry, type FabricSettings, type FabricSecretsStatus, type NodeKnowledge, type KnowledgeKind, type Proposal, type Transcript,
 } from '../lib/api/types';
 import { FixtureSource, guardState, newRecord, taskSlug, updatedAtOf } from '../lib/fabric/source';
 import { parseRecord } from '../lib/fabric/parse';
+import type { CcSession } from '../lib/api/types';
+import type { TaskRecord } from '../lib/fabric/types';
 import { serializeRecord } from '../lib/fabric/serialize';
-import { buildSample, isoDay, LAB, SAMPLE, VM } from './sample';
+import { buildSample, isoDay, LAB, SAMPLE, VM, VM_QA } from './sample';
 
 interface MockOpts {
   empty?: boolean;
@@ -27,17 +29,29 @@ export function createMockApi(opts: MockOpts = {}): Api {
   let fabSettings: FabricSettings = {
     default_folder: '~/', model: '', telegram_user_id: null, auto_mode: false,
     question_budget: 5, heartbeat_interval_s: 10, execute: 'full', capabilities: { tools: ['read_file', 'write_file', 'run_command'], checks: ['git', 'cargo'] }, setup: { completed_steps: [], completed: false },
-    claude_bin: '', effort: '', max_budget_usd: 0, execute_timeout_s: 1800,
+    claude_bin: '', effort: '', max_budget_usd: 0, execute_timeout_s: 1800, replan_on_fail: true, propose_procedures: true,
   };
-  let fabSettingsExist = false;
+  const ready = typeof location !== 'undefined' && new URLSearchParams(location.search).has('ready');
+  if (ready) fabSettings = { ...fabSettings, setup: { completed_steps: ['folder', 'claude'], completed: true } };
+  let fabSettingsExist = ready;
   let know: NodeKnowledge = {
     rules: 'Ask before deleting files.\nKeep commits small.',
     knowledge: 'Tests run with npm test.\nThe API lives in src/server.',
-    learned: [{ id: 'l1', text: 'Prefer pnpm over npm here.', applies_when: 'installing packages', scope: 'project', count: 3, source_tasks: [], last_confirmed: null }],
+    learned: [{ id: 'l1', text: 'Prefer pnpm over npm here.', applies_when: 'installing packages', scope: 'project', count: 3, source_tasks: [], last_confirmed: null },
+      { id: 'l2', text: 'Ship to the home address, standard shipping.', applies_when: 'ordering parts online with a very long condition that wraps', scope: 'global', count: 5, source_tasks: [], last_confirmed: '2026-10-20T09:30:00Z', always: true },
+    ],
   };
-  const ccSessions = [
+  let proposals: Proposal[] = [{ id: 'p1', applies_when: 'Adding an API route', steps: '- Add the handler in src/server/routes\n- Register it in src/server/index.ts\n- Run npm test', source_task: '2026-10-29-add-health-route', created_at: '2026-10-29T12:00:00Z' }];
+  const takeProposal = (id: string) => {
+    const p = proposals.find((x) => x.id === id);
+    if (!p) throw new ApiError(404, `No proposal ${id}`);
+    proposals = proposals.filter((x) => x.id !== id);
+    return p;
+  };
+  const ccSessions: CcSession[] = [
     { id: 'mock-session-1', title: 'Fix the login redirect', modified_at: new Date(Date.now() - 3600_000).toISOString(), messages: 6, bytes: 4200 },
     { id: 'mock-session-2', title: '', modified_at: new Date(Date.now() - 3 * 86400_000).toISOString(), messages: 2, bytes: 900 },
+    { id: 'mock-session-3', title: 'Order the filament', modified_at: new Date(Date.now() - 86400_000).toISOString(), messages: 4, bytes: 2100, task: { title: 'Order 2 kg of black PLA', role: 'plan' } },
   ];
   const ccExtra: Record<string, Transcript['entries']> = {};
   const ccTranscript = (id: string, limit: number): Transcript => {
@@ -55,9 +69,10 @@ export function createMockApi(opts: MockOpts = {}): Api {
   const fabSecrets: FabricSecretsStatus = { telegram_bot_token: false };
   const fabric = new FixtureSource();
   const FAB_EVENTS = '/fixtures/home/.fabric-space/events.log';
-  const remote = remoteFixtures(today);
+  const qa = typeof location !== 'undefined' && new URLSearchParams(location.search).has('qa');
+  const remote = remoteFixtures(today, qa);
   let rev = 1;
-  const specs: Record<string, typeof SAMPLE> = { local: SAMPLE, lab: LAB, vm: VM };
+  const specs: Record<string, typeof SAMPLE> = { local: SAMPLE, lab: LAB, vm: qa ? VM_QA : VM };
   const PLAIN_DIRS = ['docs', 'notes', 'projects', 'node_modules'];
   const specFor = (src: Source): typeof SAMPLE =>
     specs[src.id] ?? [['', null, null], ...PLAIN_DIRS.map((d): (typeof SAMPLE)[number] => [d, null, null])];
@@ -263,6 +278,14 @@ export function createMockApi(opts: MockOpts = {}): Api {
       if (!ccSessions.some((s) => s.id === id)) throw new ApiError(404, 'No such session');
       return ccTranscript(id, limit);
     },
+    async fabricCcTrack(_f, id) {
+      await wait();
+      const s = ccSessions.find((x) => x.id === id);
+      if (!s) throw new ApiError(404, 'No such session');
+      if (s.task) throw new ApiError(409, 'This session is already tracked by a task.');
+      s.task = { title: s.title || 'Untitled session', role: 'plan' };
+      return { path: `/fixtures/home/.fabric-space/tasks/${id}.md` };
+    },
     async fabricCcSend({ id, message }) {
       await wait();
       if (!message.trim()) throw new ApiError(400, 'Message is empty');
@@ -280,6 +303,15 @@ export function createMockApi(opts: MockOpts = {}): Api {
       know = { ...know, learned: know.learned.map((l) => (l.id === id ? { ...l, always } : l)) };
       return clone(know);
     },
+    async fabricProposalsRead() { await wait(); return clone(proposals); },
+    async fabricProposalAccept(_f, id) {
+      await wait();
+      const p = takeProposal(id);
+      const section = `### Procedure: ${p.applies_when}\n${p.steps}`;
+      know = { ...know, knowledge: know.knowledge.trim() ? `${know.knowledge.trimEnd()}\n\n${section}` : section };
+      return clone(proposals);
+    },
+    async fabricProposalDismiss(_f, id) { await wait(); takeProposal(id); return clone(proposals); },
     async fabricAgentStatus() { return { running: true, reason: null }; },
     async fabricAgentStart() { return { running: true, reason: null }; },
     async fabricCheck(req) {
@@ -316,13 +348,42 @@ export function createMockApi(opts: MockOpts = {}): Api {
   return api;
 }
 
-function remoteFixtures(today: string) {
+const RICH_PLAN = {
+  tools: ['Write', 'Edit(//etc/hosts)', 'Bash(python3 -m unittest:*)', 'WebFetch'],
+  checks: [{ cmd: 'python3', args: ['-m', 'unittest', 'discover'] }, { cmd: 'git', args: ['diff', '--stat'] }],
+};
+
+function richer(r: TaskRecord): TaskRecord {
+  return { ...r, sessions: { ...r.sessions, plan: 'mock-session-1' }, plan_meta: { ...r.plan_meta!, tools: RICH_PLAN.tools, checks: RICH_PLAN.checks } };
+}
+
+function replanned(r: TaskRecord): TaskRecord {
+  const log = `${r.sections.log}\n- 2026-10-24T19:02:30Z evaluate: replanning after failed check (a2)`;
+  return {
+    ...richer(r),
+    verdict: {
+      result: 'fail', at: '2026-10-24T19:02:25Z',
+      items: [
+        { id: 'a1', pass: true, evidence: 'audit.log shows only granted fields were filled' },
+        { id: 'a2', pass: false, evidence: 'cart shows 1 x black PLA 1 kg, 1 kg short; the shop allows 1 spool per order' },
+      ],
+    },
+    sections: { ...r.sections, log, logEntries: [...r.sections.logEntries, { ts: '2026-10-24T19:02:30Z', step: 'evaluate', message: 'replanning after failed check (a2)' }] },
+  };
+}
+
+function remoteFixtures(today: string, qa = false) {
   const fx = new FixtureSource();
-  const PICK: [node: string, fixture: string, title: string][] = [
+  type Pick = [node: string, fixture: string, title: string, patch?: (r: TaskRecord) => TaskRecord];
+  const PICK: Pick[] = [
     ['', '01-reminder', 'Check printer firmware'],
     ['', '05-running', 'Order filament'],
     ['app', '02-open-question', 'Order filament spools'],
-    ['app', '04-awaiting-approval', 'Approve the release plan'],
+    ['app', '04-awaiting-approval', 'Approve the release plan', qa ? richer : undefined],
+    ...(qa ? [
+      ['app', '03-choice-question', 'Choose the shipping address'] as Pick,
+      ['app', '04-awaiting-approval', 'Re-plan the release', replanned] as Pick,
+    ] : []),
   ];
   const root = '~/sample';
   const dirOf = (node: string) => `${root}${node ? `/${node}` : ''}/.fabric-space/tasks`;
@@ -332,12 +393,13 @@ function remoteFixtures(today: string) {
   const ready = (async () => {
     const all = await fx.listRecords();
     const regs = await fx.listRegistry();
-    for (const [node, fixture, title] of PICK) {
+    for (const [node, fixture, title, patch] of PICK) {
       const src = all.find((r) => r.path.includes(`/${fixture}/`));
       if (!src) continue;
       const id = `${today}-${taskSlug(title)}`;
       const path = `${dirOf(node)}/${id}.md`;
-      files.set(path, serializeRecord({ ...parseRecord(src.text), id, title }));
+      const rec = { ...parseRecord(src.text), id, title };
+      files.set(path, serializeRecord(patch ? patch(rec) : rec));
       if (fixture === '05-running') {
         const reg = regs.find((r) => r.path.includes('/05-running/'));
         if (reg) registry = [{ name: `${id}--vm.yaml`, text: reg.text.replace(/^task_path:.*$/m, `task_path: ${path}`).replace(/^task_id:.*$/m, `task_id: ${id}`).replace(/^folder:.*$/m, `folder: ${root}`) }];

@@ -33,11 +33,13 @@ Exit test on a fresh machine: finish setup, hand-write a reminder and delegate i
 
 ## Wave 2: tell it once
 
-Built on 2026-10-31: the once, always or no prompt, always-rules applied silently and listed in the approval, and the app managing learned records. Not built: grant scope allow-for-this-project, grant revocation, full-text search over past records and per task-type checklists.
+Built on 2026-10-31: the once, always or no prompt, always-rules applied silently and listed in the approval, and the app managing learned records. Similar finished tasks in the folder chain are matched by title words and shown to the planner. Not built: grant scope allow-for-this-project, grant revocation, full-text search over the bodies of past records and per task-type checklists.
 
 A decision made in one task is offered back in the next, with the three answers once, always, or no. Learned records are read by the gatherer and shown to the definer as priors with an applies-when condition. Always-rules apply silently and are listed in the approval message. The app manages learned records. Grant scope allow-for-this-project, grant revocation, full-text search over past records and per task-type checklists come here. Exit test: the same kind of task three times, asked, then always, then assumed and listed.
 
 ## Wave 3: trust and control
+
+Built on 2026-10-31: a failed evaluation re-plans once, cost caps per run and per task, auto mode limited to local file rules, promotion of an always-rule to global after two projects, and the staleness review of always-rules. Procedure proposals are built: the executor session proposes after a pass and the user accepts in node settings. Not built: checkpoints inside a run, several agents per folder and long-form review.
 
 Procedure proposals are staged after a passed evaluation and accepted in the app, never auto-accepted. A learned rule is promoted to global after confirmation in two projects. Always-rules get a staleness review. An irreversible step waits at a checkpoint even in auto mode. A failed evaluation re-plans once. Cost caps, several agents per folder and long-form review in the app belong here. Exit test: a run proposes a procedure, the user accepts it, the next run uses it, and an irreversible task waits at a checkpoint.
 

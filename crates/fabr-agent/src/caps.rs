@@ -112,12 +112,14 @@ pub fn auto_safe(rule: &str) -> bool {
 pub fn executor_rules(meta: Option<&PlanMeta>) -> Vec<String> {
     let mut out: Vec<String> = ALWAYS_GRANTED.iter().map(|t| (*t).to_string()).collect();
     for rule in meta.map(|m| m.tools.as_slice()).unwrap_or_default() {
-        if valid_rule(rule) && !out.contains(rule) {
+        if valid_rule(rule) && !FOLDER_EDITS.contains(&rule.as_str()) && !out.contains(rule) {
             out.push(rule.clone());
         }
     }
     out
 }
+
+const FOLDER_EDITS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
 pub fn static_caps() -> Capabilities {
     Capabilities {
@@ -230,7 +232,11 @@ mod tests {
             assert!(!valid_rule(bad), "{bad:?}");
         }
         assert_eq!(rule_tool("Bash(npm test:*)"), "Bash");
-        assert_eq!(executor_rules(Some(&meta(&["Edit", "Read", "browser"], &[]))), ["Read", "Glob", "Grep", "Edit"]);
+        assert_eq!(executor_rules(Some(&meta(&["Edit", "Read", "browser"], &[]))), ["Read", "Glob", "Grep"]);
+        assert_eq!(
+            executor_rules(Some(&meta(&["Write", "Edit(//tmp/x.md)", "Bash(npm test)"], &[]))),
+            ["Read", "Glob", "Grep", "Edit(//tmp/x.md)", "Bash(npm test)"]
+        );
     }
 
     #[test]

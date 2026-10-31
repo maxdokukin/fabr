@@ -136,7 +136,18 @@ pub fn show(path: &Path) -> Result<String, FabrError> {
         s.push_str(&format!("\nPlan:\n{}\n", r.plan.trim()));
     }
     if let Some(m) = &r.plan_meta {
-        let tools = if m.tools.is_empty() { "read only".to_string() } else { m.tools.join(", ") };
+        let tools: Vec<String> = m
+            .tools
+            .iter()
+            .map(|t| {
+                if matches!(t.as_str(), "Edit" | "Write" | "MultiEdit" | "NotebookEdit") {
+                    format!("{t} (inside this folder)")
+                } else {
+                    t.clone()
+                }
+            })
+            .collect();
+        let tools = if tools.is_empty() { "nothing else".to_string() } else { tools.join(", ") };
         s.push_str(&format!("\nTools the executor may use: Read, Glob, Grep, {tools}\n"));
         let reversible = m.reversibility.as_deref().unwrap_or("unknown");
         s.push_str(&format!("Reversible: {reversible}\n"));
@@ -204,16 +215,32 @@ pub fn delegate(path: &Path) -> Result<String, FabrError> {
 
 pub fn answer(path: &Path, text: &str) -> Result<String, FabrError> {
     change(path, |r| {
-        match r.question.as_ref() {
+        let (value, replacement) = match r.question.as_ref() {
             None => return bad("no open question"),
             Some(q) if answered(q) => return bad("question is already answered"),
-            _ => {}
-        }
-        let a = Answer { value: Some(text.into()), replacement: None, granted: None, by: Some("cli".into()), at: Some(now_utc()) };
+            Some(q) if q.kind == "choice" => choice_answer(q.options.as_deref().unwrap_or_default(), text)?,
+            _ => (text.to_string(), None),
+        };
+        let a = Answer { value: Some(value), replacement, granted: None, by: Some("cli".into()), at: Some(now_utc()) };
         apply_gui(r, &GuiPatch { answer: Some(a), ..Default::default() });
         Ok(())
     })?;
     Ok("answer recorded".into())
+}
+
+fn choice_answer(options: &[String], text: &str) -> Result<(String, Option<String>), FabrError> {
+    let text = text.trim();
+    let (head, rest) = text.split_once(|c: char| c == ',' || c == ':' || c.is_whitespace()).unwrap_or((text, ""));
+    let head = head.trim().to_lowercase();
+    let Some(pick) = options.iter().find(|o| o.to_lowercase() == head) else {
+        return bad(format!("answer with one of: {}; after no, add what to do instead", options.join(", ")));
+    };
+    let rest = rest.trim_start_matches([',', ':', ' ']).trim();
+    match (pick.as_str(), rest.is_empty()) {
+        ("no", true) => bad("after no, say what to do instead, as in: no, ship to the office"),
+        ("no", false) => Ok(("no".into(), Some(rest.to_string()))),
+        _ => Ok((pick.clone(), None)),
+    }
 }
 
 fn decide(path: &Path, status: &str, note: Option<String>) -> Result<String, FabrError> {
@@ -359,6 +386,14 @@ mod tests {
         let p = new(&e, "Buy pla");
         assert!(matches!(super::ask(&e.ctx, &p, "chat", "hi"), Err(FabrError::BadRequest(_))));
         assert!(matches!(super::ask(&e.ctx, &p, "plan", "hi"), Err(FabrError::NotFound(_))));
+    }
+
+    #[test]
+    fn choice_answers_need_an_option_and_no_needs_a_replacement() {
+        let opts = ["once".to_string(), "always".to_string(), "no".to_string()];
+        assert_eq!(choice_answer(&opts, "Always").unwrap(), ("always".to_string(), None));
+        assert_eq!(choice_answer(&opts, "no, ship to the office").unwrap(), ("no".to_string(), Some("ship to the office".to_string())));
+        assert!(choice_answer(&opts, "no").is_err() && choice_answer(&opts, "maybe").is_err());
     }
 
     #[test]

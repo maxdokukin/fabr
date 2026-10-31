@@ -6,13 +6,13 @@ Delegate itself is not a step. It sets `requests.delegate`, and the orchestrator
 
 | Step | Gate | Actor | Reads | Writes |
 |---|---|---|---|---|
-| gather | no | orchestrator, no model | the folder chain up to the default folder | `### Gathered` in Context: rules, knowledge, learned answers, the node's files |
+| gather | no | orchestrator, no model | the folder chain up to the default folder | `### Gathered` in Context: rules, knowledge, learned answers, the node's files, up to 3 similar finished tasks |
 | define | yes | planner session, new, `sessions.plan` | Context with answers | spec, success, 1 to 3 assertions, or one question |
 | plan | no | the same planner session, resumed | spec, assertions | plan with `### Inputs`, `### Outputs`, `### Steps`; `plan_meta` (reversibility, tools, checks); approval digest |
 | approve | yes | the user, in the GUI or on Telegram | the defined task | `approval`, `grants.granted` |
 | execute | no | executor session, `sessions.execute` | plan, answers | files inside the node, `execute:` log lines per tool use |
 | evaluate | no | allowlisted checks, then a validator session, new, `sessions.evaluate` | assertions, the executor's summary, check outcomes | verdict, state succeeded or failed |
-| learn | no | orchestrator | answers | `.fabric-space/.agents/learned.yaml` in the node |
+| learn | no | orchestrator, then the executor session resumed read-only after a pass | answers, the finished work | `.fabric-space/.agents/learned.yaml`; a procedure proposal in `.fabric-space/proposals.yaml` |
 | notify | no | orchestrator | the record | `events.log` line, Telegram notice, step cleared |
 
 ## How each session runs
@@ -21,7 +21,7 @@ Delegate itself is not a step. It sets `requests.delegate`, and the orchestrator
 
 | Role | Permission flags |
 |---|---|
-| planner, validator | `--permission-mode plan --permission-prompts none --tools Read,Glob,Grep` |
+| planner, validator, proposer (the executor session resumed after a pass) | `--permission-mode plan --permission-prompts none --tools Read,Glob,Grep` |
 | executor | `--permission-mode acceptEdits --permission-prompts none --allowedTools "Read Glob Grep <plan_meta.tools>" --disallowedTools` with Edit, Write, MultiEdit and NotebookEdit on `.fabric-space/**` |
 | executor, read-only mode | adds `--tools Read,Glob,Grep` |
 
@@ -30,6 +30,8 @@ Delegate itself is not a step. It sets `requests.delegate`, and the orchestrator
 - A second approved task in a node waits (`other_running`) and shows registry `activity: queued`. One in-progress task per node.
 - Approval is checked before every executor run, including resumes and restarts: status approved, a digest equal to the recomputed one, a valid plan, and `by` not `auto` when the plan is irreversible. A mismatch sends the task back to approve with a pending approval.
 - A session id is passed to `--resume` only when it is a UUID; anything else starts a new session.
+- Bare `Edit`, `Write`, `MultiEdit` and `NotebookEdit` in a plan are shown to the user but not passed to the executor, because acceptEdits already allows edits inside the folder and a bare rule would also allow every path outside it. An edit outside the folder is denied and comes back as an exact-path allow question.
+- A rule is offered for allow only when it fits the log line unchanged (200 characters, single spaces, nothing redacted), because the grant matches the logged denial.
 - Auto mode approves a plan only when it is reversible and every rule in `plan_meta.tools` is a file tool on a path inside the folder (`caps::auto_safe`). Bash, WebFetch, WebSearch and absolute or parent paths always wait for the user.
 - `plan_meta.tools` holds Claude Code permission rules: Read, Glob, Grep, Edit, Write, MultiEdit, NotebookEdit, WebFetch, WebSearch, bare or with a spec, and `Bash(<pattern>)`. Bare `Bash`, `Bash(*)` and unknown names are refused (`validate_plan`).
 - A plan without the three subsections gets one repair round on the resumed planner session, then a stage error.
@@ -37,6 +39,12 @@ Delegate itself is not a step. It sets `requests.delegate`, and the orchestrator
 - Claude Code itself lets read-only commands such as `uname` or `date` run in acceptEdits without a rule, so they never reach the question.
 - A run without structured output is resumed once with a request to return it. If the executor still returns only text, that text becomes its summary and evaluate runs. The other roles count a stage error.
 - When the user refuses, the record goes back through plan on the same planner session, with the user's note.
+- New learned ids are unique under the default folder, and define resolves a cited id by the id and the text that gather showed. Every read-modify-write of `learned.yaml` holds an flock on `.fabric-space/.agents/learned.lock`.
+- Answering no to a rule clears always on every copy with the same text and applies-when, across the root when a global is involved; turning a global off clears its project copies.
+- An always-rule confirmed in two projects is promoted to a global record in the root's `learned.yaml` and announced with a `learned` event. Gather lists a global record once and leaves out its project copies.
+- An always-rule whose `last_confirmed` is older than `always_review_days` is not applied silently; define asks the once, always or no question again. Once or always refreshes it, and no clears always.
+- After a pass, with `propose_procedures` on, the executor session is asked whether its way of working is worth reusing. A yes is stored as a proposal that only the user can accept into `knowledge.md`; gather never reads proposals. When `knowledge.md` is over the 8 KB gather cap, gather puts its `### Procedure:` sections first (up to 16 KB), then the rest up to 8 KB. The call is skipped at the task spend cap or while a chat holds the session, and an error there never fails the task.
+- A failed evaluation re-plans once: the planner session is resumed with each failed assertion and its evidence, even when the user wrote the plan (the planner may return it unchanged, logged `plan: unchanged after failed check`). The new plan needs a new approval, and the executor then resumes its own session with the failed checks, the spec, the revised plan and the current assertions. That prompt is sent again until a run on it produces a turn. The validator is a new session. A second fail fails the task. `replan_on_fail = false` turns this off; the log marker `evaluate: replanning after failed check` makes it happen at most once.
 - A stage that errors logs `error N`. The third consecutive error on the same stage moves the record to failed. A run that hits the spend cap fails the task at once, because a retry would spend the cap again. With `max_task_usd` set, a task whose `cost_usd` has reached it stops before its next run.
 - Cancel, pause, complete and suspend kill a running Claude Code process group within about a second. Quitting the desktop app kills every live run (`claude::abort_all`). Every run's process group is listed in `~/.fabric-space/registry/_runs.txt`, and a runner that starts kills the groups that a dead runner left behind. On Linux the child also gets SIGTERM when fabr dies.
 - A run that would resume a session waits while the app's chat holds `<node>/.fabric-space/chat/<session>.lock` with a live pid.

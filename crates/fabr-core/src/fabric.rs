@@ -440,9 +440,16 @@ pub(crate) struct NewTask {
     pri: u8,
 }
 
+pub(crate) fn clean_title(s: &str) -> String {
+    s.chars().map(|c| if c == '\t' { ' ' } else { c }).filter(|c| !c.is_control()).collect::<String>().trim().to_string()
+}
+
 pub(crate) fn validate_new(req: &FabricCreateReq) -> Result<NewTask, FabrError> {
-    let title = req.title.trim();
-    if title.is_empty() || title.contains('\n') {
+    if req.title.trim().contains('\n') {
+        return Err(FabrError::BadRequest("a task needs a one-line title".into()));
+    }
+    let title = clean_title(&req.title);
+    if title.is_empty() {
         return Err(FabrError::BadRequest("a task needs a one-line title".into()));
     }
     let due = req.due.as_deref().map(str::trim).filter(|d| !d.is_empty());
@@ -455,7 +462,7 @@ pub(crate) fn validate_new(req: &FabricCreateReq) -> Result<NewTask, FabrError> 
     if pri > 3 {
         return Err(FabrError::BadRequest(format!("pri must be 0-3: {pri}")));
     }
-    Ok(NewTask { title: title.to_string(), due: due.map(String::from), pri })
+    Ok(NewTask { title, due: due.map(String::from), pri })
 }
 
 pub(crate) fn new_task_base(title: &str, now: chrono::DateTime<chrono::Utc>) -> String {

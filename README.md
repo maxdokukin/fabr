@@ -60,7 +60,7 @@ Work from a terminal: `fabr status` lists every task and what it waits for, and 
 
 ## Status
 
-Planning, approval, execution and validation run through Claude Code today, with a spend cap and a time limit per run. Pause, cancel and redo work. Answers you give are saved as learned notes for the next task in that folder. Telegram questions, approvals and notices are built and tested against a mock only. The personal data bank and form filling are designed and not built.
+Planning, approval, execution and validation run through Claude Code today, with spend caps and a time limit. An answer you mark Always applies to later tasks in that folder, and a failed check gets one revised plan. Telegram questions, approvals and notices are built and tested against a mock only. The personal data bank and form filling are designed and not built.
 
 ---
 

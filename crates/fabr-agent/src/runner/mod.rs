@@ -11,9 +11,11 @@ pub use signal::{install as install_signals, stopping};
 
 use crate::board::{Activity, Board, Extras};
 use crate::claude::{ClaudeEngine, resolve_bin};
-use crate::lifecycle::{Ctl, advance_with, apply_redo, task_path_key, trailing_error};
+use crate::lifecycle::{Ctl, advance_with, apply_redo, replanned, task_path_key, trailing_error};
 use crate::now_utc;
-use crate::settings::{check_timeout_s, execute_timeout_s, max_budget_usd, max_task_usd};
+use crate::settings::{
+    always_review_days, check_timeout_s, execute_timeout_s, max_budget_usd, max_task_usd, propose_procedures, replan_on_fail,
+};
 use crate::state::{
     append_log, clean_message, driven, is_terminal, parked, pending_tail, stage_label, state_name, suspend_expired, suspended_now,
 };
@@ -128,6 +130,9 @@ impl Runner {
         ctl.harness = crate::caps::load(ctx)?;
         ctl.root = Some(gate.default_folder.clone());
         ctl.max_task_usd = max_task_usd(&space);
+        ctl.replan_on_fail = replan_on_fail(&space);
+        ctl.always_review_days = always_review_days(&space);
+        ctl.propose_procedures = propose_procedures(&space);
         Ok(Runner {
             events: Events::new(&space),
             space,
@@ -745,12 +750,21 @@ fn event_keys(path: &Path, rec: &TaskRecord) -> Vec<EventKey> {
             });
         } else if let Some(a) = rec.approval.as_ref().filter(|a| a.status == "pending") {
             out.push(EventKey {
-                dedupe: format!("{at}|waiting|approval|{}", a.digest.clone().unwrap_or_default()),
+                dedupe: format!(
+                    "{at}|waiting|approval|{}{}",
+                    a.digest.clone().unwrap_or_default(),
+                    if replanned(rec) { "|replan" } else { "" }
+                ),
                 kind: "waiting",
                 detail: "plan awaiting approval".to_string(),
                 at: log_time(&rec.log, &["plan", "approve"], None).unwrap_or_else(|| rec.updated_at.clone()),
             });
         }
+    }
+    for (when, msg) in
+        rec.log.lines().filter_map(|l| l.strip_prefix("- ")?.split_once(" learn: ")).filter(|(_, m)| m.starts_with("promoted "))
+    {
+        out.push(EventKey { dedupe: format!("{at}|learned|{when}|{msg}"), kind: "learned", detail: msg.to_string(), at: when.to_string() });
     }
     let verdict = |rec: &TaskRecord| {
         rec.verdict.as_ref().map(|v| format!("{} of {} assertions passed", v.items.iter().filter(|i| i.pass).count(), v.items.len()))

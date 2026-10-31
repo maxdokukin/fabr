@@ -189,7 +189,8 @@ export interface Capabilities { tools: string[]; checks: string[] }
 export interface FabricSettings {
   default_folder: string; model: string; telegram_user_id: number | null; auto_mode: boolean;
   question_budget: number; heartbeat_interval_s: number; execute: ExecuteMode; capabilities: Capabilities; setup: SetupState;
-  claude_bin: string; effort: string; max_budget_usd: number; execute_timeout_s: number;
+  claude_bin: string; effort: string; max_budget_usd: number; execute_timeout_s: number; replan_on_fail: boolean;
+  propose_procedures: boolean;
 }
 export interface FabricSettingsRead { exists: boolean; settings: FabricSettings }
 export interface FabricSecretsWriteReq { telegram_bot_token?: string }
@@ -199,7 +200,7 @@ export interface FabricSecretsStatus {
 }
 export interface OpenSessionReq { folder: string; session_id: string }
 export interface OpenClaudeReq { folder: string }
-export interface CcSession { id: string; title: string; modified_at: string; messages: number; bytes: number }
+export interface CcSession { id: string; title: string; modified_at: string; messages: number; bytes: number; task?: { title: string; role: 'plan' | 'execute' | 'evaluate' | 'source' } | null }
 export interface TranscriptEntry { role: 'user' | 'assistant' | 'tool'; text: string; tool?: string | null; at?: string | null }
 export interface CcSendReq { folder: string; id: string; message: string }
 export interface CcSendRes { reply: string; cost_usd: number }
@@ -207,6 +208,7 @@ export interface Transcript { id: string; title: string; entries: TranscriptEntr
 export interface LearnedRecord { id: string; text: string; applies_when: string; scope: string; count: number; source_tasks: string[]; last_confirmed?: string | null; always?: boolean }
 export type KnowledgeKind = 'rules' | 'knowledge';
 export interface NodeKnowledge { rules: string; knowledge: string; learned: LearnedRecord[] }
+export interface Proposal { id: string; applies_when: string; steps: string; source_task: string; created_at: string }
 export interface FabricAgentStatus { running: boolean; reason: string | null }
 export type FabricCheckKind = 'folder' | 'claude' | 'telegram_token';
 export interface FabricCheckReq { kind: FabricCheckKind; path?: string }

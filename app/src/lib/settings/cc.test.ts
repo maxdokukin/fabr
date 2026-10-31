@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { render } from 'svelte/server';
 import { createMockApi } from '../../mock/api';
-import { ago, newestFirst, nodeFolder, sessionTitle } from '../fabric/cc';
+import { listOrNote, ago, newestFirst, nodeFolder, sessionTitle, taskLine } from '../fabric/cc';
+import SessionRow from './SessionRow.svelte';
 import TranscriptView from '../fabric/TranscriptView.svelte';
 import ApprovalPanel from '../fabric/ApprovalPanel.svelte';
 import SessionsBlock from '../fabric/SessionsBlock.svelte';
@@ -15,7 +16,7 @@ const ID2 = '3f2b8c1e-4d5a-4e6f-9a7b-0c1d2e3f4a5b';
 describe('mock claude code api', () => {
   it('lists sessions and reads a transcript with a limit', async () => {
     const list = await api.fabricCcSessions('/x');
-    expect(list.length).toBe(2);
+    expect(list.length).toBe(3);
     const t = await api.fabricCcTranscript('/x', list[0].id, 2);
     expect(t.entries.length).toBe(2);
     expect(t.truncated).toBe(true);
@@ -30,6 +31,33 @@ describe('mock claude code api', () => {
     await expect(api.fabricCcSend({ folder: '/x', id: 'nope', message: 'hi' })).rejects.toThrow();
     await expect(api.fabricCcSend({ folder: '/x', id: 'mock-session-1', message: ' ' })).rejects.toThrow();
   });
+  it('tracks an untracked session once and links it to the new task', async () => {
+    const api = createMockApi({ latency: 0 });
+    const before = await api.fabricCcSessions('/x');
+    expect(before.map((s) => !!s.task)).toEqual([false, false, true]);
+    expect((await api.fabricCcTrack('/x', 'mock-session-1')).path).toContain('mock-session-1');
+    expect((await api.fabricCcSessions('/x'))[0].task).toEqual({ title: 'Fix the login redirect', role: 'plan' });
+    await expect(api.fabricCcTrack('/x', 'mock-session-1')).rejects.toThrow();
+    await expect(api.fabricCcTrack('/x', 'nope')).rejects.toThrow();
+  });
+  it('session rows show the task role or a Track button', () => {
+    const s = { id: 'a', title: 'Order', modified_at: '2026-10-30T10:00:00Z', messages: 4, bytes: 1 };
+    const props = { onopen: () => {}, ontranscript: () => {}, ontrack: () => {} };
+    const free = render(SessionRow, { props: { ...props, s } }).body;
+    expect(free).toContain('Track as task');
+    expect(free).toContain('4 messages');
+    for (const [role, word] of [['plan', 'Planner'], ['execute', 'Executor'], ['evaluate', 'Validator']] as const) {
+      const body = render(SessionRow, { props: { ...props, s: { ...s, task: { title: 'Buy PLA', role } } } }).body;
+      expect(body).toContain(`${word} of Buy PLA`);
+      expect(body).not.toContain('Track as task');
+    }
+    const src = render(SessionRow, { props: { ...props, s: { ...s, task: { title: 'Buy PLA', role: 'source' } } } }).body;
+    expect(src).toContain('Tracked as Buy PLA');
+    expect(src).not.toContain('Track as task');
+    expect(render(SessionRow, { props: { ...props, s, busy: true } }).body).toContain('disabled');
+    expect(taskLine({ title: 'T', role: 'plan' })).toBe('Planner of T');
+    expect(taskLine({ title: 'T', role: 'source' })).toBe('Tracked as T');
+  });
   it('writes knowledge and forgets learned records', async () => {
     const k = await api.fabricKnowledgeWrite('/x', 'rules', 'Be brief.');
     expect(k.rules).toBe('Be brief.');
@@ -42,6 +70,17 @@ describe('mock claude code api', () => {
     expect((await api.fabricLearnedAlways('/x', id, true)).learned[0].always).toBe(true);
     expect((await api.fabricLearnedAlways('/x', id, false)).learned[0].always).toBe(false);
     await expect(api.fabricLearnedAlways('/x', 'nope', true)).rejects.toThrow();
+  });
+  it('accepting a proposal appends it to knowledge and dismissing removes it', async () => {
+    const api = createMockApi({ latency: 0 });
+    const [p] = await api.fabricProposalsRead('/x');
+    expect(await api.fabricProposalAccept('/x', p.id)).toEqual([]);
+    expect((await api.fabricKnowledgeRead('/x')).knowledge).toContain(`\n\n### Procedure: ${p.applies_when}\n${p.steps}`);
+    await expect(api.fabricProposalAccept('/x', p.id)).rejects.toThrow();
+    await expect(api.fabricProposalDismiss('/x', p.id)).rejects.toThrow();
+    const other = createMockApi({ latency: 0 });
+    expect(await other.fabricProposalDismiss('/x', p.id)).toEqual([]);
+    expect((await other.fabricKnowledgeRead('/x')).knowledge).not.toContain('### Procedure');
   });
 });
 
@@ -77,6 +116,17 @@ describe('render', () => {
     expect(body).not.toContain('Stop always');
     const on = render(KnowledgeGroup, { props: { ...props, k: { ...k, learned: [{ ...k.learned[0], always: true }] } } }).body;
     for (const t of ['Always · When installing', 'Stop always']) expect(on).toContain(t);
+    expect(on).not.toContain('Global');
+    const g = render(KnowledgeGroup, { props: { ...props, k: { ...k, learned: [{ ...k.learned[0], id: 'g1', scope: 'global', always: true, last_confirmed: '2026-10-31T08:00:00Z' }] } } }).body;
+    expect(g).toContain('Global · Always · When installing · x3 · Last confirmed 2026-10-31');
+  });
+  it('knowledge group lists suggested procedures only when there are some', () => {
+    const k = { rules: '', knowledge: '', learned: [] };
+    const props = { k, onsave: () => {}, onforget: () => {}, onalways: () => {} };
+    expect(render(KnowledgeGroup, { props }).body).not.toContain('Suggested procedures');
+    const proposals = [{ id: 'p3', applies_when: 'adding a route', steps: '- add the handler\n- run npm test', source_task: '2026-10-29-add-route', created_at: '2026-10-29T12:00:00Z' }];
+    const { body } = render(KnowledgeGroup, { props: { ...props, proposals } });
+    for (const t of ['Suggested procedures', 'When adding a route', '- add the handler\n- run npm test', 'From 2026-10-29-add-route', 'data-testid="accept-p3"', 'data-testid="dismiss-p3"']) expect(body).toContain(t);
   });
   it('a choice question shows the prior and the three answers', () => {
     const question = { id: 'q2', kind: 'choice' as const, text: 'Ship home again?', options: ['once', 'always', 'no'], prior: { text: 'Ship to home', source_task: '/p/.fabric-space/tasks/2026-10-01-order.md', last_confirmed: '2026-10-01T00:00:00Z' }, fields: null, asked_at: '2026-10-31T10:00:00Z', answer: null };
@@ -140,8 +190,19 @@ describe('claude limits', () => {
     expect([r.settings.max_budget_usd, r.settings.execute_timeout_s]).toEqual([0, 1800]);
     const w = await api.fabricSettingsWrite({ ...r.settings, max_budget_usd: 2.5, execute_timeout_s: 600 });
     expect([w.settings.max_budget_usd, w.settings.execute_timeout_s]).toEqual([2.5, 600]);
+    expect(r.settings.propose_procedures).toBe(true);
+    expect((await api.fabricSettingsWrite({ ...w.settings, propose_procedures: false })).settings.propose_procedures).toBe(false);
   });
   it('mock claude check reports sign-in', async () => {
     expect(await api.fabricCheck({ kind: 'claude' })).toMatchObject({ ok: true, logged_in: true, auth: 'claude.ai, max' });
+  });
+});
+
+describe('listOrNote', () => {
+  it('falls back to an empty list with a note when loading fails', async () => {
+    expect(await listOrNote(Promise.resolve([1]), 'X')).toEqual({ list: [1], note: null });
+    const r = await listOrNote(Promise.reject(new Error('bad yaml')), 'Suggested procedures');
+    expect(r.list).toEqual([]);
+    expect(r.note).toContain('Suggested procedures could not be read');
   });
 });

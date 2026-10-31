@@ -486,6 +486,70 @@ fn the_registry_entry_follows_the_task_from_gather_to_notify() {
 }
 
 #[test]
+fn a_failed_check_replans_on_the_planner_session_and_resumes_the_executor() {
+    let e = ready();
+    queue_plan(&e);
+    e.fake.push(ok(exec_out("done", "wrote nothing"), 0.05));
+    e.fake.push(ok(json!({"items": [{"id": "a1", "verdict": "fail", "evidence": "greet.md is missing"}]}), 0.01));
+    e.fake.push(ok(plan_out(&["Write"]), 0.02));
+    e.fake.push(vec![
+        common::init(),
+        common::tool_use("Write", json!({"file_path": "greet.md", "content": "hi"})),
+        "@SH printf hi > greet.md".into(),
+        common::result(exec_out("done", "wrote greet.md"), 0.05, json!([])),
+    ]);
+    e.fake.push(ok(verdict_out(true), 0.01));
+    e.fake.push(ok(json!({"worth_saving": false, "applies_when": "", "steps": ""}), 0.001));
+    let path = new_record(&e, "write a greeting");
+    edit(&path, |r| r.requests.delegate = true);
+    let approve = || {
+        edit(&path, |rec| {
+            let a = rec.approval.as_mut().unwrap();
+            a.status = "approved".into();
+            a.by = Some("gui".into());
+        })
+    };
+    let (mut r, _) = runner(&e);
+    r.start().unwrap();
+    r.tick();
+    approve();
+    r.tick();
+    let rec = load(&path);
+    assert_eq!((rec.state, rec.step, rec.waiting), (State::Defined, Some(Step::Approve), true), "{}", rec.log);
+    assert_eq!((rec.approval.as_ref().unwrap().status.as_str(), rec.verdict.as_ref().unwrap().result.as_str()), ("pending", "fail"));
+    let lines: Vec<&str> = rec.log.lines().filter_map(|l| l.split_once(' ').and_then(|(_, t)| t.split_once(' ')).map(|(_, m)| m)).collect();
+    let at = lines.iter().position(|l| *l == "evaluate: verdict fail").unwrap();
+    assert_eq!(lines[at + 1..at + 3], ["evaluate: replanning after failed check (a1)", "plan: unchanged after failed check"]);
+    assert_eq!(e.fake.calls(), 5);
+    assert_eq!(e.fake.flag(5, "--resume"), rec.sessions.plan);
+    assert!(e.fake.stdin(5).contains("The result failed these checks:\n- a1: greet.md is missing\nRevise the plan"), "{}", e.fake.stdin(5));
+    let doc = registry_doc(&e);
+    assert_eq!((doc["state"].as_str(), doc["waiting"].as_str()), (Some("defined"), Some("approval")));
+    let kinds = |e: &Env| events(e).iter().map(|l| l.split_whitespace().nth(1).unwrap_or("").to_string()).collect::<Vec<_>>();
+    assert_eq!(kinds(&e), ["waiting", "waiting"]);
+    let executor = e.fake.flag(3, "--session-id");
+    assert!(executor.is_some() && rec.sessions.execute == executor);
+
+    approve();
+    r.tick();
+    let rec = load(&path);
+    assert_eq!((rec.state, rec.step, rec.verdict.as_ref().unwrap().result.as_str()), (State::Succeeded, None, "pass"), "{}", rec.log);
+    assert_eq!(e.fake.calls(), 8);
+    assert_eq!(e.fake.flag(8, "--resume"), executor);
+    assert!(rec.log.contains("learn: no proposal (not worth saving)"), "{}", rec.log);
+    assert_eq!(e.fake.flag(6, "--resume"), executor);
+    let prompt = e.fake.stdin(6);
+    assert!(
+        prompt.contains("The previous attempt failed these checks:\n- a1: greet.md is missing") && prompt.contains("### Steps"),
+        "{prompt}"
+    );
+    assert!(e.fake.flag(7, "--session-id").is_some_and(|s| Some(&s) != executor.as_ref()) && !e.fake.has(7, "--resume"));
+    assert_eq!(kinds(&e), ["waiting", "waiting", "done"]);
+    assert!(registry_files(&e).is_empty());
+    r.shutdown(true);
+}
+
+#[test]
 fn the_heartbeat_interval_comes_from_settings() {
     let e = ready();
     queue_question(&e);
@@ -787,6 +851,10 @@ fn the_whole_pipeline_runs_through_claude_code_sessions() {
         common::result(exec_out("done", "installed left-pad and wrote greet.md"), 0.04, json!([])),
     ]);
     e.fake.push(ok(verdict_out(true), 0.005));
+    e.fake.push(ok(
+        json!({"worth_saving": true, "applies_when": "Writing a greeting file", "steps": "- read notes.md\n- write greet.md"}),
+        0.004,
+    ));
     let path = new_record(&e, "write a greeting");
     edit(&path, |r| r.requests.delegate = true);
     let (mut r, _) = runner(&e);
@@ -833,7 +901,7 @@ fn the_whole_pipeline_runs_through_claude_code_sessions() {
     assert_eq!(e.fake.flag(4, "--session-id").as_deref(), Some(executor.as_str()));
     assert_eq!(e.fake.flag(4, "--permission-mode").as_deref(), Some("acceptEdits"));
     assert_eq!(e.fake.flag(4, "--permission-prompts").as_deref(), Some("none"));
-    assert_eq!(e.fake.flag(4, "--allowedTools").as_deref(), Some("Read Glob Grep Write"));
+    assert_eq!(e.fake.flag(4, "--allowedTools").as_deref(), Some("Read Glob Grep"));
     assert!(e.fake.flag(4, "--disallowedTools").unwrap().starts_with("Edit(./.fabric-space/**) Edit(.fabric-space/**) Write("));
     assert!(!e.fake.has(1, "--disallowedTools"));
     assert!(!e.fake.has(4, "--tools"));
@@ -856,7 +924,7 @@ fn the_whole_pipeline_runs_through_claude_code_sessions() {
     let rec = load(&path);
     assert_eq!((rec.state, rec.step), (State::Succeeded, None), "{}", rec.log);
     assert_eq!(e.fake.flag(5, "--resume").as_deref(), Some(executor.as_str()));
-    assert_eq!(e.fake.flag(5, "--allowedTools").as_deref(), Some("Read Glob Grep Write Bash(npm install left-pad)"));
+    assert_eq!(e.fake.flag(5, "--allowedTools").as_deref(), Some("Read Glob Grep Bash(npm install left-pad)"));
     assert!(e.fake.stdin(5).contains("Continue the task") && e.fake.stdin(5).contains("User answered: allow"));
     assert!(rec.log.contains("execute: allowed Bash(npm install left-pad) by user for q2; approval re-signed"), "{}", rec.log);
     assert_eq!(rec.plan_meta.as_ref().unwrap().tools, ["Write", "Bash(npm install left-pad)"]);
@@ -870,8 +938,24 @@ fn the_whole_pipeline_runs_through_claude_code_sessions() {
     assert!(e.fake.stdin(6).contains("installed left-pad and wrote greet.md") && e.fake.stdin(6).contains("test -f greet.md exit 0"));
     let v = rec.verdict.as_ref().unwrap();
     assert_eq!((v.result.as_str(), v.items[0].evidence.as_str()), ("pass", "greet.md holds hi"));
-    assert!((rec.cost_usd - 0.117).abs() < 1e-9, "{}", rec.cost_usd);
-    assert_eq!(e.fake.calls(), 6);
+    assert!((rec.cost_usd - 0.121).abs() < 1e-9, "{}", rec.cost_usd);
+    assert_eq!(e.fake.calls(), 7);
+    assert_eq!(e.fake.flag(7, "--resume").as_deref(), Some(executor.as_str()));
+    assert!(!e.fake.has(7, "--session-id") && !e.fake.has(7, "--disallowedTools"));
+    for (flag, want) in [("--permission-mode", "plan"), ("--tools", "Read,Glob,Grep"), ("--allowedTools", "Read Glob Grep")] {
+        assert_eq!(e.fake.flag(7, flag).as_deref(), Some(want), "{flag}");
+    }
+    assert!(e.fake.flag(7, "--json-schema").unwrap().contains("worth_saving"));
+    assert!(e.fake.stdin(7).contains("worth reusing for similar tasks in this folder"), "{}", e.fake.stdin(7));
+    assert!(rec.log.contains("learn: proposed p1"), "{}", rec.log);
+    let proposals = fabr_core::proposals::read(&e.proj).unwrap();
+    assert_eq!(proposals.len(), 1);
+    assert_eq!(
+        (proposals[0].applies_when.as_str(), proposals[0].steps.as_str(), proposals[0].source_task.as_str()),
+        ("Writing a greeting file", "- read notes.md\n- write greet.md", rec.id.as_str())
+    );
+    assert!(!fabr_agent::lifecycle::gather_bundle(&e.proj, None).contains("write greet.md"));
+    assert!(fabr_core::knowledge::read(&e.proj).unwrap().knowledge.is_empty());
     assert!(events(&e).iter().any(|l| l.contains(" done ") && l.ends_with("1 of 1 assertions passed")), "{:?}", events(&e));
     assert!(registry_files(&e).is_empty());
     assert!(rec.log.contains("learn: captured 1 answer"), "{}", rec.log);
@@ -1033,4 +1117,154 @@ fn a_prior_is_asked_then_always_then_assumed_and_a_replacement_is_learned() {
     assert_eq!((added.text.as_str(), added.applies_when.as_str(), added.always), ("the red box", "Which box?", false));
     assert_eq!(learned.len(), 3);
     r.shutdown(true);
+}
+
+fn learned_at(dir: &Path, yaml: &str) {
+    let agents = dir.join(".fabric-space/.agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(agents.join("learned.yaml"), yaml).unwrap();
+}
+
+fn delegated_in(e: &Env, folder: &Path, title: &str) -> PathBuf {
+    let req = FabricCreateReq {
+        folder: folder.to_string_lossy().into_owned(),
+        title: title.into(),
+        due: None,
+        pri: None,
+        context: Some("some context".into()),
+        spec: None,
+        success: None,
+    };
+    let p = PathBuf::from(fabric::create_in(&req, &e.ctx.home).unwrap().path);
+    edit(&p, |rec| rec.requests.delegate = true);
+    p
+}
+
+#[test]
+fn a_stale_always_rule_is_asked_again_and_always_or_no_reviews_it() {
+    let e = ready();
+    learned_at(
+        &e.proj,
+        "records:\n  - {id: l1, text: Ship to home, applies_when: Where to ship?, last_confirmed: 2020-01-01T00:00:00Z, always: true}\n  - {id: l2, text: Use the blue box, applies_when: Which box?, last_confirmed: 2020-01-01T00:00:00Z, always: true}\n",
+    );
+    e.fake.push(ok(cites("l1", "Ship to home again?"), 0.01));
+    queue_plan(&e);
+    let (mut r, _) = runner(&e);
+    r.start().unwrap();
+    let first = delegated_in(&e, &e.proj, "order filament");
+    r.tick();
+    let rec = load(&first);
+    let q = rec.question.as_ref().unwrap();
+    assert_eq!((q.kind.as_str(), q.text.as_str()), ("choice", "Ship to home again? Last confirmed 2020-01-01."), "{}", rec.log);
+    assert!(rec.log.contains("define: asked q1 about l1, last confirmed 2020-01-01") && rec.plan_meta.is_none(), "{}", rec.log);
+
+    reply(&first, "always", None);
+    r.tick();
+    let rec = load(&first);
+    assert_eq!((rec.state, rec.step), (State::Defined, Some(Step::Approve)), "{}", rec.log);
+    assert!(rec.log.contains("define: q1 refreshed l1"), "{}", rec.log);
+    assert_eq!(rec.plan_meta.as_ref().unwrap().assumptions[0].rule_id, "l1");
+    let l1 = &fabr_core::knowledge::read_learned(&e.proj).unwrap()[0];
+    assert!(l1.always && !l1.last_confirmed.as_deref().unwrap().starts_with("2020"), "{l1:?}");
+
+    e.fake.push(ok(defines_with("l1"), 0.01));
+    e.fake.push(ok(plan_out(&["Write"]), 0.02));
+    let second = delegated_in(&e, &e.proj, "order more filament");
+    r.tick();
+    let rec = load(&second);
+    assert!(rec.question.is_none() && rec.log.contains("define: assumed l1 (always)"), "{}", rec.log);
+
+    e.fake.push(ok(cites("l2", "Blue box again?"), 0.01));
+    queue_plan(&e);
+    let third = delegated_in(&e, &e.proj, "pack the order");
+    r.tick();
+    assert!(load(&third).question.as_ref().unwrap().text.ends_with("Last confirmed 2020-01-01."));
+    reply(&third, "no", Some("the red box"));
+    r.tick();
+    let rec = load(&third);
+    assert!(
+        rec.log.contains("define: q1 cleared always on l2") && rec.plan_meta.as_ref().is_none_or(|m| m.assumptions.is_empty()),
+        "{}",
+        rec.log
+    );
+    assert!(!fabr_core::knowledge::read_learned(&e.proj).unwrap()[1].always);
+    r.shutdown(true);
+}
+
+#[test]
+fn always_in_a_second_project_promotes_the_rule_to_global_and_announces_it() {
+    let e = ready();
+    let (pets, notes) = (e.proj.join("pets"), e.proj.join("team-notes"));
+    learned_at(&notes, "records:\n  - {id: l1, text: Ship to home, applies_when: Where to ship?, count: 2, always: true}\n");
+    learned_at(&pets, "records:\n  - {id: l3, text: ship to  home, applies_when: Where to ship?, last_confirmed: 2026-10-01T00:00:00Z}\n");
+    e.fake.push(ok(cites("l3", "Ship to home again?"), 0.01));
+    queue_plan(&e);
+    let (mut r, _) = runner(&e);
+    r.start().unwrap();
+    let task = delegated_in(&e, &pets, "order filament");
+    r.tick();
+    reply(&task, "always", None);
+    r.tick();
+    let rec = load(&task);
+    assert!(rec.log.contains("learn: promoted l3 to global (confirmed in pets and team-notes)"), "{}", rec.log);
+    let global = fabr_core::knowledge::read_learned(&e.proj).unwrap();
+    assert_eq!((global.len(), global[0].id.as_str(), global[0].scope.as_str(), global[0].count), (1, "g1", "global", 3));
+    let line = events(&e).into_iter().find(|l| l.contains(" learned ")).unwrap_or_default();
+    assert!(line.ends_with("promoted l3 to global (confirmed in pets and team-notes)"), "{:?}", events(&e));
+    r.shutdown(true);
+}
+
+fn passing(e: &Env, propose: Option<Vec<String>>) -> TaskRecord {
+    queue_plan(e);
+    e.fake.push(vec![
+        common::init(),
+        common::tool_use("Write", json!({"file_path": "greet.md", "content": "hi"})),
+        "@SH printf hi > greet.md".into(),
+        common::result(exec_out("done", "wrote greet.md"), 0.05, json!([])),
+    ]);
+    e.fake.push(ok(verdict_out(true), 0.01));
+    if let Some(lines) = propose {
+        e.fake.push(lines);
+    }
+    let path = new_record(e, "write a greeting");
+    edit(&path, |r| r.requests.delegate = true);
+    let (mut r, _) = runner(e);
+    r.start().unwrap();
+    r.tick();
+    edit(&path, |rec| {
+        let a = rec.approval.as_mut().unwrap();
+        a.status = "approved".into();
+        a.by = Some("gui".into());
+    });
+    r.tick();
+    r.shutdown(true);
+    let rec = load(&path);
+    assert_eq!((rec.state, rec.step, rec.verdict.as_ref().unwrap().result.as_str()), (State::Succeeded, None, "pass"), "{}", rec.log);
+    rec
+}
+
+#[test]
+fn a_proposal_not_worth_saving_or_a_failed_propose_run_writes_nothing_and_the_task_still_succeeds() {
+    let e = ready();
+    let rec = passing(&e, Some(ok(json!({"worth_saving": false, "applies_when": "x", "steps": "- y"}), 0.002)));
+    assert_eq!(e.fake.calls(), 5);
+    assert!(rec.log.contains("learn: no proposal (not worth saving)") && (rec.cost_usd - 0.092).abs() < 1e-9, "{}", rec.log);
+    assert!(!e.proj.join(".fabric-space/proposals.yaml").exists());
+
+    let e = ready();
+    e.fake.exit_code(5, 1);
+    let rec = passing(&e, Some(vec!["@ERR boom".into()]));
+    assert_eq!(e.fake.calls(), 5);
+    assert!(rec.log.contains("learn: no proposal (Claude Code ended without a result (exit 1): boom)"), "{}", rec.log);
+    assert!(!rec.log.contains("error 1") && !e.proj.join(".fabric-space/proposals.yaml").exists(), "{}", rec.log);
+}
+
+#[test]
+fn proposing_can_be_turned_off() {
+    let e = ready();
+    let settings = e.ctx.settings_path();
+    std::fs::write(&settings, format!("propose_procedures = false\n{}", std::fs::read_to_string(&settings).unwrap())).unwrap();
+    let rec = passing(&e, None);
+    assert_eq!(e.fake.calls(), 4);
+    assert!(!rec.log.contains("proposal") && !rec.log.contains("proposed"), "{}", rec.log);
 }

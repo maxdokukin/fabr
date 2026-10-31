@@ -38,3 +38,29 @@ fn status_json_and_answer_use_the_default_folder() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("already answered"));
 }
+
+#[test]
+fn track_adds_a_claude_code_session_as_a_reminder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let proj = tmp.path().join("proj");
+    let cfg = tmp.path().join("claude");
+    std::fs::create_dir_all(&proj).unwrap();
+    let id = "2e6225e8-f0da-4b18-8eca-40b44d4bae82";
+    let dir = cfg.join("projects").join(fabr_core::ccsession::encode_folder(&proj.canonicalize().unwrap()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{id}.jsonl")), r#"{"type":"user","message":{"content":"Sort the scans"}}"#).unwrap();
+    let run = || {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_fabr"));
+        c.args(["track", proj.to_str().unwrap(), id]);
+        Command::env(&mut c, "FABR_HOME", &home);
+        Command::env(&mut c, "CLAUDE_CONFIG_DIR", &cfg);
+        c.output().unwrap()
+    };
+    let out = run();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let path = String::from_utf8(out.stdout).unwrap();
+    let text = std::fs::read_to_string(path.trim()).unwrap();
+    assert!(text.contains("title: Sort the scans") && text.contains(&format!("Picked up from Claude Code session {id}.")));
+    assert!(!run().status.success());
+}

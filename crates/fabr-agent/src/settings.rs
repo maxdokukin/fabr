@@ -82,3 +82,19 @@ pub fn max_budget_usd(space: &Path) -> f64 {
 pub fn max_task_usd(space: &Path) -> f64 {
     usd(space, "max_task_usd")
 }
+
+fn flag(space: &Path, key: &str) -> bool {
+    doc_of(space).and_then(|d| d.get(key).and_then(|v| v.as_bool())).unwrap_or(true)
+}
+
+pub fn replan_on_fail(space: &Path) -> bool {
+    flag(space, "replan_on_fail")
+}
+
+pub fn propose_procedures(space: &Path) -> bool {
+    flag(space, "propose_procedures")
+}
+
+pub fn always_review_days(space: &Path) -> u32 {
+    doc_of(space).and_then(|d| d.get("always_review_days").and_then(|v| v.as_integer())).and_then(|n| u32::try_from(n).ok()).unwrap_or(90)
+}

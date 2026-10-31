@@ -49,12 +49,18 @@
   });
   const irreversible = $derived(planMeta?.reversibility === 'irreversible');
   const BASE = ['Read', 'Glob', 'Grep'];
-  const ruleNote = (rule: string) => {
+  const FILE_TOOLS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'];
+  const ruleNote = (rule: string): { note: string; hot: boolean } => {
     const name = rule.split('(')[0];
-    return name === 'Bash' ? 'runs commands' : name === 'WebFetch' || name === 'WebSearch' ? 'uses the network' : '';
+    if (name === 'Bash') return { note: 'runs commands', hot: true };
+    if (name === 'WebFetch' || name === 'WebSearch') return { note: 'uses the network', hot: true };
+    if (!FILE_TOOLS.includes(name)) return { note: '', hot: false };
+    const path = rule.includes('(') ? rule.slice(rule.indexOf('(') + 1).replace(/\)$/, '').trim() : '';
+    const outside = /^(\/|~)/.test(path) || path.includes('..');
+    return outside ? { note: 'outside this folder', hot: true } : { note: 'inside this folder', hot: false };
   };
   const assumed = $derived(planMeta?.assumptions ?? []);
-  const rules = $derived((planMeta?.tools ?? []).filter((t) => !BASE.includes(t)).map((t) => ({ t, note: ruleNote(t) })));
+  const rules = $derived((planMeta?.tools ?? []).filter((t) => !BASE.includes(t)).map((t) => ({ t, ...ruleNote(t) })));
   const describe = (g: { field: string; scope: Scope }) => `${g.field} (${g.scope})`;
 
   async function send(d: ApprovalDecision) {
@@ -120,6 +126,20 @@
         {:else}<p class="dim">No fields requested.</p>{/if}
       </section>
 
+      {#if planMeta}
+        <section data-testid="may-use">
+          <h4>Claude Code may use</h4>
+          <div class="chips">
+            {#each BASE as t (t)}<span class="chip muted">{t}</span>{/each}
+            {#each rules as r (r.t)}<span class="chip" class:hot={r.hot}>{r.t}{#if r.note}<small class:flag={r.hot}>{r.note}</small>{/if}</span>{/each}
+          </div>
+          {#if planMeta.checks?.length}
+            <p class="dim">Checks after the run:</p>
+            <ul class="list mono">{#each planMeta.checks as c, i (i)}<li>{[c.cmd, ...c.args].join(' ')}</li>{/each}</ul>
+          {/if}
+        </section>
+      {/if}
+
       {#if assumed.length}
         <section data-testid="assumed">
           <h4>Assumed</h4>
@@ -130,7 +150,7 @@
 
       {#if planSession && folder}
         <section>
-          <div class="row">
+          <div class="acts acts--text">
             <Button variant="tint" data-testid="discuss-plan" onclick={discuss}>{DISCUSS_LABEL}</Button>
             <Button variant="tint" data-testid="discuss-here" onclick={() => (discussHere = true)}>{DISCUSS_HERE_LABEL}</Button>
             {#if onredo}<Button variant="tint" disabled={busy} data-testid="approval-redo-plan" onclick={onredo}>Redo plan</Button>{/if}
@@ -139,36 +159,23 @@
         </section>
       {/if}
 
-      {#if planMeta}
-        <section data-testid="may-use">
-          <h4>Claude Code may use</h4>
-          <div class="chips">
-            {#each BASE as t (t)}<span class="chip muted">{t}</span>{/each}
-            {#each rules as r (r.t)}<span class="chip" class:hot={r.note}>{r.t}{#if r.note}<small>{r.note}</small>{/if}</span>{/each}
-          </div>
-          {#if planMeta.checks?.length}
-            <p class="dim">Checks after the run:</p>
-            <ul class="list mono">{#each planMeta.checks as c, i (i)}<li>{[c.cmd, ...c.args].join(' ')}</li>{/each}</ul>
-          {/if}
-          {#if irreversible}<p class="warn" role="alert" data-testid="irreversible">Irreversible: once this runs it cannot be undone.</p>{/if}
-        </section>
-      {/if}
+      {#if irreversible}<p class="warn" role="alert" data-testid="irreversible">Irreversible: once this runs it cannot be undone.</p>{/if}
 
       {#if !onsubmit}
         <p class="dim">Waiting for a decision.</p>
       {:else}
-        <div class="row">
+        <div class="acts">
           <Button variant="primary" disabled={busy} onclick={approve}>Approve</Button>
           <Button variant="danger" on={refusing} disabled={busy} onclick={() => (refusing = !refusing)}>Refuse</Button>
         </div>
         {#if refusing}
           <textarea class="in" rows="2" aria-label="Refusal note" placeholder="Why (optional)" bind:value={note} disabled={busy}></textarea>
-          <div class="row"><Button variant="danger" disabled={busy} onclick={refuse}>Confirm refusal</Button></div>
+          <div class="acts"><Button variant="danger" disabled={busy} onclick={refuse}>Confirm refusal</Button></div>
         {/if}
         {#if busy}<p class="dim" role="status">Saving…</p>{/if}
         {#if error}
           <p class="err" role="alert">{error}</p>
-          {#if conflict}<div class="row"><Button onclick={reload}>Reload</Button></div>{/if}
+          {#if conflict}<div class="acts"><Button onclick={reload}>Reload</Button></div>{/if}
         {/if}
       {/if}
     {:else}
@@ -187,10 +194,11 @@
   h4 { margin: 0; font-size: var(--fs-12); color: var(--label-2); text-transform: uppercase; }
   .txt { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
   .dim { color: var(--label-2); font-size: var(--fs-12); margin: 0; overflow-wrap: anywhere; }
-  .warn { color: var(--orange); font-weight: 600; margin: 0; }
-  .err { margin: 0; color: var(--red); }
+  .warn { color: var(--warning-text); font-weight: 600; margin: 0; }
+  .err { margin: 0; color: var(--error-text); }
   .list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
-  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .acts { display: flex; gap: 8px; flex-wrap: wrap; }
+  .acts--text { margin-left: -10px; }
   .in { width: 100%; box-sizing: border-box; font: inherit; padding: 8px 10px; border: 1px solid var(--sep); border-radius: var(--radius-ctl); background: transparent; color: inherit; }
   .fieldtree { display: flex; flex-direction: column; gap: 4px; }
   .head { font-weight: 600; margin-top: 4px; }
@@ -200,6 +208,7 @@
   .chip { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--fs-12); padding: 2px 6px; border: 1px solid var(--sep); border-radius: var(--radius-ctl); overflow-wrap: anywhere; }
   .chip.muted { color: var(--label-2); }
   .chip.hot { border-color: var(--orange); }
-  .chip small { color: var(--orange); margin-left: 4px; }
+  .chip small { color: var(--label-2); margin-left: 4px; }
+  .chip small.flag { color: var(--warning-text); }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--fs-12); }
 </style>

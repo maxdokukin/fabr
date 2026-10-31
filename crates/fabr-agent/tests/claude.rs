@@ -242,11 +242,13 @@ fn an_executor_that_skips_the_structured_result_is_nudged_then_done_with_its_tex
         answers: "",
         allowed: &allowed,
         read_only: false,
+        failed: None,
     };
     let run = engine.execute(&input, &mut NoWatch);
     assert_eq!(fake.calls(), 2);
     assert_eq!(fake.flag(2, "--resume"), fake.flag(1, "--session-id"));
     assert_eq!(fake.flag(1, "--name").as_deref(), Some("fabr execute: write a list"));
+    assert!(fake.stdin(1).contains("You may use: Read, Write, and you may create and edit files inside this folder."), "{}", fake.stdin(1));
     assert!((run.cost_usd - 0.25).abs() < 1e-9);
     match run.end {
         End::Done(out) => assert_eq!((out.status, out.summary.as_str()), (fabr_agent::ExecStatus::Done, "Wrote a.md with the list.")),

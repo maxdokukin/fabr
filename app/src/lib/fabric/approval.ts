@@ -2,7 +2,7 @@ import { SCOPES, isoNow } from './answer';
 import { parseRecord } from './parse';
 import { serializeRecord } from './serialize';
 import { updatedAtOf, type FabricSource } from './source';
-import type { Scope, TaskRecord } from './types';
+import type { Scope, TaskRecord, VerdictItem } from './types';
 import { ConflictError } from './write';
 
 export interface ApprovalDecision {
@@ -14,6 +14,19 @@ export interface ApprovalDecision {
 export function needsHumanApproval(record: TaskRecord, alwaysAsk: string[] = []): boolean {
   if (record.plan_meta?.reversibility === 'irreversible') return true;
   return record.grants.requested.some((f) => f === 'payment' || f.startsWith('payment.') || alwaysAsk.includes(f));
+}
+
+export const REPLAN_MARK = 'replanning after failed check';
+
+export function replanFailures(record: TaskRecord): VerdictItem[] | null {
+  if (!record.waiting || record.approval?.status !== 'pending') return null;
+  if (!record.sections.logEntries.some((e) => e.step === 'evaluate' && e.message.startsWith(REPLAN_MARK))) return null;
+  return (record.verdict?.items ?? []).filter((i) => !i.pass);
+}
+
+export function verdictIsPrevious(record: TaskRecord): boolean {
+  if (record.state === 'succeeded' || record.state === 'failed' || record.verdict === null) return false;
+  return record.sections.logEntries.some((e) => e.step === 'evaluate' && e.message.startsWith(REPLAN_MARK));
 }
 
 export function applyApproval(record: TaskRecord, decision: ApprovalDecision, by: 'gui' | 'telegram', now: Date = new Date()): TaskRecord {

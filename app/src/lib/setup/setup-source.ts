@@ -35,7 +35,7 @@ export function emptySettings(): FabricSettings {
   return {
     default_folder: '', model: '', telegram_user_id: null, auto_mode: false,
     question_budget: 5, heartbeat_interval_s: 10, execute: 'full', capabilities: { tools: [], checks: [] }, setup: { completed_steps: [], completed: false },
-    claude_bin: '', effort: '', max_budget_usd: 0, execute_timeout_s: 1800,
+    claude_bin: '', effort: '', max_budget_usd: 0, execute_timeout_s: 1800, replan_on_fail: true, propose_procedures: true,
   };
 }
 

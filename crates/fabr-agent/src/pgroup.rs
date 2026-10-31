@@ -5,11 +5,6 @@ unsafe extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
 }
 
-#[cfg(target_os = "linux")]
-unsafe extern "C" {
-    fn prctl(option: i32, ...) -> i32;
-}
-
 pub const TERM: i32 = 15;
 pub const KILL: i32 = 9;
 
@@ -52,22 +47,5 @@ pub fn group_alive(pgid: u32) -> bool {
 }
 
 pub fn own_group(cmd: &mut Command) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::process::CommandExt;
-        // SAFETY: the hook runs between fork and exec and only calls prctl(2), which is async-signal-safe.
-        unsafe {
-            cmd.pre_exec(|| {
-                prctl(1, TERM as std::ffi::c_ulong);
-                Ok(())
-            });
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = cmd;
+    fabr_core::ccsession::own_group(cmd);
 }

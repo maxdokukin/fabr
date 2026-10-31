@@ -13,15 +13,20 @@ The agent backend (`crates/fabr-agent`), the core (`crates/fabr-core`) and the a
 | `~/.fabric-space/events.log` | one line per event | backend | app |
 | `~/.fabric-space/telegram.yaml` | YAML | backend (`telegram.rs`) | backend |
 | `~/.fabric-space/registry/_runs.txt` | `pgid owner_pid` per line | backend, per Claude Code run | backend on start |
-| `<folder>/.fabric-space/chat/<session>.lock` | pid | app chat (`ccsession::send`) | backend before a resume |
+| `<folder>/.fabric-space/chat/<session>.lock` | pid, written by temp file and link or rename; an empty file younger than 10 s counts as live | app chat (`ccsession::send`) | backend before a resume |
+| `<folder>/.fabric-space/.agents/learned.lock` | flock target | any `learned.yaml` writer | any `learned.yaml` writer |
+| `<folder>/.fabric-space/proposals.yaml` | YAML `next:` (counter, ids are never reused) and `records:` with `id`, `applies_when`, `steps`, `source_task`, `created_at` | learner after a pass; the app removes a record on accept or dismiss | app |
+| `<folder>/.fabric-space/.agents/knowledge.lock` | flock target | `knowledge::write` and proposal accept | same |
+| `<folder>/.fabric-space/track.lock` | flock target | `ccsession::track` | same |
+| `<folder>/.fabric-space/proposals.lock` | flock target | any `proposals.yaml` writer | any `proposals.yaml` writer |
 | `<folder>/.fabric-space/tasks/<task_id>.md` | YAML front matter plus markdown | both, by field | both |
 | `<folder>/.fabric-space/tasks.lock` | flock target | any record writer | any record writer |
 | `<folder>/.fabr/meta.toml` | TOML | app, CLI | app, CLI |
-| `<folder>/.fabric-space/.agents/rules.md`, `knowledge.md` | markdown | app (node settings) | gatherer |
-| `<folder>/.fabric-space/.agents/learned.yaml` | YAML `records:` with `id`, `text`, `applies_when`, `count`, `source_tasks`, `last_confirmed`, `always` | learner; define sets `always`; the app may delete a record or toggle `always` | gatherer, app |
+| `<folder>/.fabric-space/.agents/rules.md`, `knowledge.md` | markdown | app (node settings, and Accept on a proposal appends a `### Procedure:` section to `knowledge.md`) | gatherer |
+| `<folder>/.fabric-space/.agents/learned.yaml` | YAML `records:` with `id`, `text`, `applies_when`, `count`, `source_tasks`, `last_confirmed`, `always` | learner; define sets `always` and `last_confirmed`; promotion writes `scope: global` records with `g` ids into the root's file; the app may delete a record or toggle `always` | gatherer, app |
 | `~/.claude/projects/<folder with every non-alphanumeric as ->/<session>.jsonl` | Claude Code's own store | Claude Code | app (`ccsession.rs`), read-only |
 
-`.fabr/` holds only `meta.toml` (node settings). A `.todo` file in it is a leftover that `fabr import` converts. Remote ssh nodes list their tasks read-only through the snapshot. Planned and not in code: `data-bank/` (vault, policy, audit log), `proposals.yaml`, `index.sqlite`.
+`.fabr/` holds only `meta.toml` (node settings). A `.todo` file in it is a leftover that `fabr import` converts. Remote ssh nodes list their tasks read-only through the snapshot. Planned and not in code: `data-bank/` (vault, policy, audit log), `index.sqlite`.
 
 Human-edited files are TOML or markdown and machine-written files are YAML. Timestamps are ISO 8601 UTC with a `Z`. A task id is `YYYY-MM-DD-<slug>`, and the record file is `<task_id>.md`. A task is identified by its full path. `path_tag` is the first 8 hex characters of the sha256 of the absolute record path.
 
@@ -68,7 +73,8 @@ Only the backend writes `state`, with one exception: the app may move a reminder
 | task | defined | the define and plan steps are done and approval is pending |
 | defined | in_progress | approval approved, digest matches, not `auto` for an irreversible plan, no other in-progress task in the node |
 | defined | defined | approval refused; the plan is redone with the note |
-| in_progress | succeeded or failed | verdict pass or fail |
+| in_progress | succeeded or failed | verdict pass, or a second fail, or a fail with `replan_on_fail` off, the task cap reached or no failed item |
+| in_progress | task | the first verdict fail with `replan_on_fail` on; the verdict is kept, approval is null, `step: plan`, log `evaluate: replanning after failed check (<ids>)` |
 | in_progress | failed | `requests.cancel`, or the third consecutive error on one stage |
 | failed | task | `requests.redelegate` creates a new record linked both ways |
 | reminder | succeeded | by hand in the app |
@@ -105,11 +111,11 @@ An entry is dead when `heartbeat_at` is older than three intervals. The app mark
 
 ## Events
 
-`events.log` is append-only: `<timestamp> <kind padded to 7> <task path> <detail>`, newlines in the detail replaced by spaces. Kinds: `waiting`, `done`, `failed`, `stuck`. Open issue: the task path is not quoted, so a path with a space breaks the parse. The app keeps its own read position.
+`events.log` is append-only: `<timestamp> <kind padded to 7> <task path> <detail>`, newlines in the detail replaced by spaces. Kinds: `waiting`, `done`, `failed`, `stuck`, `learned`. A `learned` line announces a promotion to global; when the app toggle caused it, its path is the root's `learned.yaml`, not a task. Open issue: the task path is not quoted, so a path with a space breaks the parse. The app keeps its own read position.
 
 ## Settings, secrets and checks
 
-`settings.toml` keys the backend reads: `default_folder`, `claude_bin` (empty means `claude` on PATH; env `FABR_CLAUDE_BIN` wins), `model` (empty for Claude Code's default, `sonnet`, `opus`, `haiku`, `fable`, or a full `claude-` name), `effort` (empty or `low` to `max`), `max_budget_usd` (0 for no cap; passed as `--max-budget-usd`), `max_task_usd` (0 for no cap on the task's total), `execute_timeout_s` (default 1800, the wall-clock limit of one Claude Code run), `heartbeat_interval_s` (default 10), `check_timeout_s` (default 60, at most 3600), `auto_mode`, `execute` and `[setup] completed_steps`. The backend starts when `completed_steps` has `folder` and `claude` and the binary resolves. `secrets.toml` holds `telegram_bot_token`, mode 600, never loaded into an agent context; an old `anthropic_api_key` line is left alone and unused. The bot token is redacted from every log line, event and record.
+`settings.toml` keys the backend reads: `default_folder`, `claude_bin` (empty means `claude` on PATH; env `FABR_CLAUDE_BIN` wins), `model` (empty for Claude Code's default, `sonnet`, `opus`, `haiku`, `fable`, or a full `claude-` name), `effort` (empty or `low` to `max`), `max_budget_usd` (0 for no cap; passed as `--max-budget-usd`), `max_task_usd` (0 for no cap on the task's total), `replan_on_fail` (default true), `propose_procedures` (default true), `always_review_days` (default 90, 0 for never), `execute_timeout_s` (default 1800, the wall-clock limit of one Claude Code run), `heartbeat_interval_s` (default 10), `check_timeout_s` (default 60, at most 3600), `auto_mode`, `execute` and `[setup] completed_steps`. The backend starts when `completed_steps` has `folder` and `claude` and the binary resolves. `secrets.toml` holds `telegram_bot_token`, mode 600, never loaded into an agent context; an old `anthropic_api_key` line is left alone and unused. The bot token is redacted from every log line, event and record.
 
 The setup wizard has five screens: default folder, Claude Code, Telegram bot, Telegram link, done. The two Telegram screens can be skipped. The checks are `fabr check folder <path>`, `fabr check claude`, `fabr check telegram-token` and `fabr telegram link`. Each prints one JSON object with `ok`, and on failure a `reason` the user can act on, and exits 1. `check claude` runs `claude --version` and `claude auth status` and never sends a prompt; it returns `version`, `path`, `logged_in` and `auth`, and fails when Claude Code reports that nobody is signed in.
 

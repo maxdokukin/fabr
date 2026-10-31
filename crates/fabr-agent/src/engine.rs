@@ -88,6 +88,16 @@ pub struct EvaluateOut {
     pub items: Vec<JudgedItem>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct ProposeOut {
+    #[serde(default)]
+    pub worth_saving: bool,
+    #[serde(default)]
+    pub applies_when: String,
+    #[serde(default)]
+    pub steps: String,
+}
+
 pub struct DefineInput<'a> {
     pub cwd: &'a Path,
     pub resume: Option<&'a str>,
@@ -106,6 +116,8 @@ pub struct PlanInput<'a> {
     pub assertions: &'a [Assertion],
     pub answers: &'a str,
     pub refusal_note: Option<&'a str>,
+    pub failed: Option<&'a str>,
+    pub human_plan: Option<&'a str>,
     pub rejection: Option<&'a str>,
     pub allowed_tools: &'a [String],
     pub allowed_checks: &'a [String],
@@ -121,6 +133,7 @@ pub struct ExecuteInput<'a> {
     pub answers: &'a str,
     pub allowed: &'a [String],
     pub read_only: bool,
+    pub failed: Option<&'a str>,
 }
 
 pub struct EvaluateInput<'a> {
@@ -130,6 +143,12 @@ pub struct EvaluateInput<'a> {
     pub summary: &'a str,
     pub log: &'a str,
     pub checks: &'a [CheckOutcome],
+}
+
+pub struct ProposeInput<'a> {
+    pub cwd: &'a Path,
+    pub resume: &'a str,
+    pub title: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -190,6 +209,7 @@ pub trait Engine {
     fn plan(&self, input: &PlanInput, watch: &mut dyn Watch) -> Run<PlanOut>;
     fn execute(&self, input: &ExecuteInput, watch: &mut dyn Watch) -> Run<ExecuteOut>;
     fn evaluate(&self, input: &EvaluateInput, watch: &mut dyn Watch) -> Run<EvaluateOut>;
+    fn propose(&self, input: &ProposeInput, watch: &mut dyn Watch) -> Run<ProposeOut>;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -239,10 +259,33 @@ impl ScriptedExec {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Seen {
-    Define { resume: Option<String>, context: String, answers: String },
-    Plan { resume: Option<String>, answers: String, rejection: Option<String>, refusal: Option<String> },
-    Execute { resume: Option<String>, answers: String, allowed: Vec<String>, read_only: bool },
-    Evaluate { summary: String, log: String },
+    Define {
+        resume: Option<String>,
+        context: String,
+        answers: String,
+    },
+    Plan {
+        resume: Option<String>,
+        answers: String,
+        rejection: Option<String>,
+        refusal: Option<String>,
+        failed: Option<String>,
+        human_plan: Option<String>,
+    },
+    Execute {
+        resume: Option<String>,
+        answers: String,
+        allowed: Vec<String>,
+        read_only: bool,
+        failed: Option<String>,
+    },
+    Evaluate {
+        summary: String,
+        log: String,
+    },
+    Propose {
+        resume: String,
+    },
 }
 
 #[derive(Default)]
@@ -251,6 +294,7 @@ pub struct ScriptedEngine {
     plans: Mutex<VecDeque<Result<PlanOut, String>>>,
     execs: Mutex<VecDeque<Result<ScriptedExec, String>>>,
     verdicts: Mutex<VecDeque<EvaluateOut>>,
+    proposals: Mutex<VecDeque<Result<ProposeOut, String>>>,
     seen: Mutex<Vec<Seen>>,
     counter: Mutex<u32>,
     cost: f64,
@@ -290,6 +334,11 @@ impl ScriptedEngine {
         self
     }
 
+    pub fn propose(self, out: Result<ProposeOut, String>) -> ScriptedEngine {
+        lock(&self.proposals).push_back(out);
+        self
+    }
+
     pub fn push_define(&self, out: Result<DefineOut, String>) {
         lock(&self.defines).push_back(out);
     }
@@ -316,6 +365,7 @@ impl ScriptedEngine {
                         | ("plan", Seen::Plan { .. })
                         | ("execute", Seen::Execute { .. })
                         | ("evaluate", Seen::Evaluate { .. })
+                        | ("propose", Seen::Propose { .. })
                 )
             })
             .count()
@@ -366,6 +416,8 @@ impl Engine for ScriptedEngine {
             answers: input.answers.to_string(),
             rejection: input.rejection.map(str::to_string),
             refusal: input.refusal_note.map(str::to_string),
+            failed: input.failed.map(str::to_string),
+            human_plan: input.human_plan.map(str::to_string),
         });
         let session = self.session(input.resume, watch);
         let out = lock(&self.plans).pop_front().unwrap_or_else(|| Err("no scripted plan".into()));
@@ -378,6 +430,7 @@ impl Engine for ScriptedEngine {
             answers: input.answers.to_string(),
             allowed: input.allowed.to_vec(),
             read_only: input.read_only,
+            failed: input.failed.map(str::to_string),
         });
         let session = self.session(input.resume, watch);
         let script = match lock(&self.execs).pop_front() {
@@ -427,5 +480,12 @@ impl Engine for ScriptedEngine {
             },
         };
         self.finish(session, Ok(out))
+    }
+
+    fn propose(&self, input: &ProposeInput, watch: &mut dyn Watch) -> Run<ProposeOut> {
+        lock(&self.seen).push(Seen::Propose { resume: input.resume.to_string() });
+        let session = self.session(Some(input.resume), watch);
+        let out = lock(&self.proposals).pop_front().unwrap_or_else(|| Ok(ProposeOut::default()));
+        self.finish(session, out)
     }
 }

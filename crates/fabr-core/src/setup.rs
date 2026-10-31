@@ -111,12 +111,20 @@ pub struct FabricSettings {
     pub max_budget_usd: f64,
     #[serde(default = "default_execute_timeout_s")]
     pub execute_timeout_s: u32,
+    #[serde(default = "yes")]
+    pub replan_on_fail: bool,
+    #[serde(default = "yes")]
+    pub propose_procedures: bool,
 }
 
 pub const EXECUTE_TIMEOUT_RANGE: std::ops::RangeInclusive<u32> = 60..=14400;
 
 fn default_execute_timeout_s() -> u32 {
     1800
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl FabricSettings {
@@ -135,6 +143,8 @@ impl FabricSettings {
             effort: String::new(),
             max_budget_usd: 0.0,
             execute_timeout_s: default_execute_timeout_s(),
+            replan_on_fail: true,
+            propose_procedures: true,
         }
     }
 }
@@ -222,6 +232,12 @@ pub fn settings_read(ctx: &Ctx) -> Result<SettingsRead, FabrError> {
     if let Some(v) = doc.get("auto_mode").and_then(Item::as_bool) {
         s.auto_mode = v;
     }
+    if let Some(v) = doc.get("replan_on_fail").and_then(Item::as_bool) {
+        s.replan_on_fail = v;
+    }
+    if let Some(v) = doc.get("propose_procedures").and_then(Item::as_bool) {
+        s.propose_procedures = v;
+    }
     let int = |k: &str, d: u32| doc.get(k).and_then(Item::as_integer).map_or(d, |n| n.clamp(0, u32::MAX as i64) as u32);
     s.question_budget = int("question_budget", s.question_budget);
     s.heartbeat_interval_s = int("heartbeat_interval_s", s.heartbeat_interval_s);
@@ -283,6 +299,8 @@ pub fn settings_write(ctx: &Ctx, req: SettingsWriteReq) -> Result<SettingsRead, 
         }
     }
     doc["auto_mode"] = value(s.auto_mode);
+    doc["replan_on_fail"] = value(s.replan_on_fail);
+    doc["propose_procedures"] = value(s.propose_procedures);
     doc["question_budget"] = value(s.question_budget as i64);
     doc["heartbeat_interval_s"] = value(s.heartbeat_interval_s as i64);
     if !doc.get("setup").is_some_and(Item::is_table) {
@@ -690,12 +708,18 @@ mod tests {
         s.effort = "high".into();
         s.max_budget_usd = 2.5;
         s.execute_timeout_s = 600;
+        assert!(s.replan_on_fail && s.propose_procedures);
+        s.replan_on_fail = false;
+        s.propose_procedures = false;
         let w = settings_write(&c, SettingsWriteReq { settings: s.clone() }).unwrap();
         assert!(w.exists);
         assert_eq!(w.settings, s);
         let text = std::fs::read_to_string(c.settings_path()).unwrap();
         assert!(text.contains("future_key = \"x\"") && text.contains("extra = 1"));
-        assert!(text.contains("max_budget_usd = 2.5") && text.contains("execute_timeout_s = 600"));
+        assert!(
+            text.contains("max_budget_usd = 2.5") && text.contains("execute_timeout_s = 600") && text.contains("replan_on_fail = false")
+        );
+        assert!(text.contains("propose_procedures = false"));
         s.telegram_user_id = None;
         settings_write(&c, SettingsWriteReq { settings: s }).unwrap();
         assert_eq!(settings_read(&c).unwrap().settings.telegram_user_id, None);

@@ -1,7 +1,7 @@
 use crate::engine::Engine;
 use crate::lifecycle::{self, Ctl, advance_with};
 use crate::link::{self, load_record};
-use crate::settings::{load_agent_settings, max_task_usd};
+use crate::settings::{always_review_days, load_agent_settings, max_task_usd, propose_procedures, replan_on_fail};
 use crate::state::{parked, pending_tail};
 use crate::{require_local, task_path_key};
 use fabr_core::taskrec::State;
@@ -14,6 +14,9 @@ pub fn run_once(ws: &Workspace, source: &str, node_path: &str, fabric_space: &Pa
     let mut ctl = Ctl::new(fabric_space, settings.heartbeat_interval_s);
     ctl.check_timeout_s = settings.check_timeout_s;
     ctl.max_task_usd = max_task_usd(fabric_space);
+    ctl.replan_on_fail = replan_on_fail(fabric_space);
+    ctl.always_review_days = always_review_days(fabric_space);
+    ctl.propose_procedures = propose_procedures(fabric_space);
     let node_dir = ws.local_path(&NodeRef { source: source.to_string(), path: node_path.to_string() })?;
     let root = ws.local_path(&NodeRef { source: source.to_string(), path: String::new() })?;
     ctl.root = Some(root.clone());

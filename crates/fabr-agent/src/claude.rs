@@ -1,7 +1,7 @@
 use crate::caps::{on_path, runnable};
 use crate::engine::{
-    DefineInput, DefineOut, Denial, End, Engine, EvaluateInput, EvaluateOut, ExecStatus, ExecuteInput, ExecuteOut, PlanInput, PlanOut, Run,
-    ToolUse, Usage, Watch,
+    DefineInput, DefineOut, Denial, End, Engine, EvaluateInput, EvaluateOut, ExecStatus, ExecuteInput, ExecuteOut, PlanInput, PlanOut,
+    ProposeInput, ProposeOut, Run, ToolUse, Usage, Watch,
 };
 use fabr_core::FabrError;
 use fabr_core::taskrec::Assertion;
@@ -30,6 +30,8 @@ When the work is finished, return status done with a short summary of what chang
 const VALIDATOR: &str = "You are the validator for a task delegated from fabr. The current directory is the task's folder. \
 Judge with fresh eyes whether the finished work meets each assertion. Read the files to check; never change anything. \
 Answer only through the structured output.";
+const PROPOSER: &str = "You are looking back on a task you finished for fabr. The current directory is the task's folder. \
+You only read: never edit files and never run commands. Answer only through the structured output.";
 
 #[derive(Debug, Clone)]
 pub struct ClaudeEngine {
@@ -98,6 +100,7 @@ pub enum Role {
     Planner,
     Executor { read_only: bool },
     Validator,
+    Proposer,
 }
 
 pub struct Call<'a> {
@@ -113,7 +116,7 @@ pub struct Call<'a> {
 pub fn session_name(role: Role, title: &str) -> String {
     let word = match role {
         Role::Planner => "plan",
-        Role::Executor { .. } => "execute",
+        Role::Executor { .. } | Role::Proposer => "execute",
         Role::Validator => "validate",
     };
     let title: String = title.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(60).collect();
@@ -155,6 +158,7 @@ pub fn args(engine: &ClaudeEngine, call: &Call, session: &str) -> Vec<String> {
     let (mode, tools, system) = match call.role {
         Role::Planner => ("plan", Some(READ_ONLY_TOOLS), PLANNER),
         Role::Validator => ("plan", Some(READ_ONLY_TOOLS), VALIDATOR),
+        Role::Proposer => ("plan", Some(READ_ONLY_TOOLS), PROPOSER),
         Role::Executor { read_only } => ("acceptEdits", read_only.then_some(READ_ONLY_TOOLS), EXECUTOR),
     };
     out.extend(["--permission-mode".into(), mode.into(), "--permission-prompts".into(), "none".into()]);
@@ -605,6 +609,32 @@ pub fn evaluate_schema() -> Value {
     })
 }
 
+pub fn propose_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "worth_saving": {"type": "boolean"},
+            "applies_when": {"type": "string"},
+            "steps": {"type": "string"}
+        },
+        "required": ["worth_saving", "applies_when", "steps"]
+    })
+}
+
+pub fn propose_prompt(input: &ProposeInput) -> String {
+    format!(
+        "The task \"{}\" passed its checks. Is the way you did it worth reusing for similar tasks in this folder later? \
+         Say yes only for a way of working that a later task can follow, not for facts about this one task. \
+         Procedures the user already accepted are in .fabric-space/.agents/knowledge.md; do not propose one that is there.\n\n\
+         Return:\n\
+         - worth_saving: true or false.\n\
+         - applies_when: one short line naming the tasks it fits (empty when false).\n\
+         - steps: a markdown list of at most {} lines (empty when false).",
+        input.title,
+        fabr_core::proposals::MAX_STEPS
+    )
+}
+
 const DEFINE_ASK: &str = "Return:\n\
 - question: one short question for the user when something required is missing and cannot be found by reading the folder, otherwise null. Ask at most one.\n\
 - spec: what will be done, in a few plain sentences (empty when you ask).\n\
@@ -649,6 +679,17 @@ pub fn plan_prompt(input: &PlanInput) -> String {
     } else if input.refusal_note.is_some() {
         out.push_str("\nThe user refused the previous plan; propose a different one.\n");
     }
+    if let Some(h) = input.human_plan {
+        out.push_str(&format!("\nThe user wrote the current plan:\n{h}\n"));
+        out.push_str(if input.failed.is_some() || input.refusal_note.is_some() {
+            "Return it unchanged, or an empty plan, to keep it, or return a revised plan.\n"
+        } else {
+            "Keep this plan: return an empty plan with the tools and checks it needs.\n"
+        });
+    }
+    if let Some(f) = input.failed {
+        out.push_str(&format!("\nThe result failed these checks:\n{f}\nRevise the plan to fix them; keep what already works.\n"));
+    }
     if let Some(r) = input.rejection {
         out.push_str(&format!("\nYour previous plan was rejected: {r}. Return a corrected plan.\n"));
     }
@@ -667,13 +708,27 @@ pub fn plan_prompt(input: &PlanInput) -> String {
     out
 }
 
+fn tool_phrase(input: &ExecuteInput) -> String {
+    let tools = input.allowed.join(", ");
+    if input.read_only { tools } else { format!("{tools}, and you may create and edit files inside this folder") }
+}
+
 pub fn execute_prompt(input: &ExecuteInput) -> String {
     if input.resume.is_some() {
-        let mut out = String::from("Continue the task from where you stopped.");
+        let mut out = match input.failed {
+            Some(f) => format!(
+                "The previous attempt failed these checks:\n{f}\n\nSpec:\n{}\n\nThe user approved this revised plan:\n{}\n\n\
+                 Assertions that will be checked afterwards:\n{}\n\nCarry out the revised plan now; keep what already works.",
+                input.spec,
+                input.plan,
+                assertion_lines(input.assertions)
+            ),
+            None => String::from("Continue the task from where you stopped."),
+        };
         if !input.answers.trim().is_empty() {
             out.push_str(&format!("\n\nThe user's answers so far:{}", input.answers));
         }
-        out.push_str(&format!("\n\nYou may now use: {}.", input.allowed.join(", ")));
+        out.push_str(&format!("\n\nYou may now use: {}.", tool_phrase(input)));
         out.push_str("\n\nWhen you are finished or stuck, return the structured result.");
         return out;
     }
@@ -683,10 +738,13 @@ pub fn execute_prompt(input: &ExecuteInput) -> String {
         input.spec,
         input.plan,
         assertion_lines(input.assertions),
-        input.allowed.join(", ")
+        tool_phrase(input)
     );
     if input.read_only {
         out.push_str(" This machine runs tasks read-only: do not change any file.");
+    }
+    if let Some(f) = input.failed {
+        out.push_str(&format!("\n\nA previous attempt failed these checks:\n{f}"));
     }
     if !input.answers.trim().is_empty() {
         out.push_str(&format!("\n\nThe user's answers so far:{}", input.answers));
@@ -772,6 +830,22 @@ impl Engine for ClaudeEngine {
         };
         strict(self, &call, watch)
     }
+
+    fn propose(&self, input: &ProposeInput, watch: &mut dyn Watch) -> Run<ProposeOut> {
+        if !is_session_id(input.resume) {
+            return Run::failed(FabrError::BadRequest("no executor session".into()));
+        }
+        let call = Call {
+            role: Role::Proposer,
+            cwd: input.cwd,
+            resume: Some(input.resume),
+            prompt: propose_prompt(input),
+            schema: propose_schema(),
+            allowed: vec![],
+            name: session_name(Role::Proposer, input.title),
+        };
+        strict(self, &call, watch)
+    }
 }
 
 pub fn tool_line(cwd: &Path, tool: &ToolUse) -> String {
@@ -779,7 +853,11 @@ pub fn tool_line(cwd: &Path, tool: &ToolUse) -> String {
     let arg = match tool.name.as_str() {
         "Read" | "Edit" | "Write" | "MultiEdit" => short_path(cwd, &s("file_path")),
         "NotebookEdit" => short_path(cwd, &s("notebook_path")),
-        "Bash" => s("command").lines().next().unwrap_or("").to_string(),
+        "Bash" => {
+            let canon = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+            let line = s("command").lines().next().unwrap_or("").to_string();
+            [cwd, canon.as_path()].iter().fold(line, |l, dir| l.replace(&format!("{}/", dir.to_string_lossy().trim_end_matches('/')), ""))
+        }
         "Glob" | "Grep" => s("pattern"),
         "WebFetch" => s("url"),
         "WebSearch" => s("query"),
@@ -893,6 +971,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_resume_after_a_replan_carries_the_spec_the_revised_plan_and_the_assertions() {
+        let allowed = vec!["Read".to_string()];
+        let assertions = [fabr_core::taskrec::Assertion { id: "a1".into(), text: "greet.md contains hi".into() }];
+        let mut input = ExecuteInput {
+            cwd: Path::new("/tmp"),
+            resume: Some("s"),
+            title: "t",
+            spec: "Write greet.md",
+            plan: "1. put hi in greet.md",
+            assertions: &assertions,
+            answers: "",
+            allowed: &allowed,
+            read_only: false,
+            failed: Some("- a1: empty"),
+        };
+        let p = execute_prompt(&input);
+        assert!(p.starts_with("The previous attempt failed these checks:\n- a1: empty\n\nSpec:\nWrite greet.md\n\n"), "{p}");
+        assert!(
+            p.contains("revised plan:\n1. put hi in greet.md\n\nAssertions that will be checked afterwards:\na1: greet.md contains hi"),
+            "{p}"
+        );
+        assert!(p.contains("You may now use: Read, and you may create and edit files inside this folder."), "{p}");
+        input.failed = None;
+        assert!(execute_prompt(&input).starts_with("Continue the task from where you stopped."));
+    }
+
+    #[test]
     fn session_ids_are_uuid_v4() {
         let a = new_session_id();
         let b = new_session_id();
@@ -911,6 +1016,7 @@ mod tests {
         let t = |name: &str, input: Value| ToolUse { name: name.into(), input };
         assert_eq!(tool_line(cwd, &t("Edit", json!({"file_path": "/work/proj/notes.md"}))), "Edit notes.md");
         assert_eq!(tool_line(cwd, &t("Bash", json!({"command": "npm   test\nsecond"}))), "Bash npm test");
+        assert_eq!(tool_line(cwd, &t("Bash", json!({"command": "wc -w /work/proj/story.md"}))), "Bash wc -w story.md");
         assert_eq!(tool_line(cwd, &t("TodoWrite", json!({}))), "TodoWrite");
         let d = |tool: &str, input: Value| Denial { tool: tool.into(), input };
         let bash = |c: &str| rule_for(cwd, &d("Bash", json!({"command": c})));
@@ -996,6 +1102,9 @@ mod tests {
         assert_eq!(exec[i + 1], "Read Bash(npm test:*)");
         let ro = args(&e, &call(Role::Executor { read_only: true }, None, vec![]), "sid").join(" ");
         assert!(ro.contains("--tools Read,Glob,Grep"), "{ro}");
+        let prop = args(&e, &call(Role::Proposer, Some(old), vec![]), "sid").join(" ");
+        assert!(prop.contains(&format!("--resume {old}")) && !prop.contains("--disallowedTools"), "{prop}");
+        assert!(prop.contains("--permission-mode plan --permission-prompts none --tools Read,Glob,Grep --allowedTools Read Glob Grep"));
         let bare = args(&ClaudeEngine::new("claude"), &call(Role::Validator, None, vec![]), "sid").join(" ");
         assert!(!bare.contains("--model") && !bare.contains("--effort") && bare.contains("--permission-mode plan"));
     }

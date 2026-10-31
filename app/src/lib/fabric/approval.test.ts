@@ -83,3 +83,61 @@ describe('submitApproval', () => {
     await expect(submitApproval(s, path, text, { status: 'refused' })).rejects.toBeInstanceOf(ConflictError);
   });
 });
+
+describe('replan notice', async () => {
+  const { render } = await import('svelte/server');
+  const RecordScreen = (await import('./RecordScreen.svelte')).default;
+  const html = (rec: typeof pending) => render(RecordScreen, { props: { record: rec, name: 'x', now, onapprove: async () => {} } }).body;
+  const log = (step: string, message: string) => ({ ts: '2026-10-24T19:00:00Z', step, message });
+  const replanned = {
+    ...pending,
+    waiting: true,
+    verdict: { result: 'fail' as const, at: '2026-10-24T18:59:00Z', items: [{ id: 'a1', pass: true, evidence: 'ok' }, { id: 'a2', pass: false, evidence: 'greet.md is empty' }] },
+    sections: { ...pending.sections, logEntries: [...pending.sections.logEntries, log('evaluate', 'verdict fail'), log('evaluate', 'replanning after failed check (a2)'), log('plan', 'redrafted after failed check')] },
+  };
+
+  it('shows the failed items above a pending approval after a replan', () => {
+    const body = html(replanned);
+    expect(body).toContain('data-testid="replan-notice"');
+    expect(body).toContain('The first attempt failed a check. Here is a revised plan.');
+    expect(body).toMatch(/<b>a2<\/b> greet.md is empty/);
+    expect(body.indexOf('replan-notice')).toBeLessThan(body.indexOf('Approval needed'));
+    expect(body.slice(body.indexOf('replan-notice'), body.indexOf('Approval needed'))).not.toContain('<b>a1</b>');
+  });
+
+  it('labels the kept verdict as the first attempt until the task ends', () => {
+    expect(html(replanned)).toContain('Verdict of the first attempt');
+    expect(html({ ...replanned, state: 'succeeded' })).not.toContain('Verdict of the first attempt');
+  });
+
+  it('is absent without the marker or once the approval is decided', () => {
+    expect(html({ ...pending, waiting: true })).not.toContain('replan-notice');
+    expect(html({ ...replanned, waiting: false, approval: { ...replanned.approval!, status: 'approved' } })).not.toContain('replan-notice');
+  });
+});
+
+describe('file rule chips', async () => {
+  const { render } = await import('svelte/server');
+  const ApprovalPanel = (await import('./ApprovalPanel.svelte')).default;
+  const chips = (tools: string[]) => {
+    const planMeta = { ...pending.plan_meta!, tools };
+    return render(ApprovalPanel, { props: { approval: pending.approval!, grants: pending.grants, planMeta, plan: '', assertions: [] } }).body;
+  };
+  const chip = (body: string, rule: string) => body.slice(body.indexOf(`>${rule}<`) - 30, body.indexOf('</span>', body.indexOf(`>${rule}<`)));
+
+  it('marks bare and relative file tools as inside this folder, without the warning highlight', () => {
+    const body = chips(['Write', 'Edit(src/**)', 'MultiEdit', 'NotebookEdit']);
+    for (const r of ['Write', 'Edit(src/**)', 'MultiEdit', 'NotebookEdit']) {
+      expect(chip(body, r)).toContain('inside this folder');
+      expect(chip(body, r)).not.toContain('hot');
+    }
+  });
+
+  it('marks absolute, home and parent paths as outside this folder with the highlight', () => {
+    const body = chips(['Edit(//etc/hosts)', 'Write(/tmp/x)', 'Edit(~/notes.md)', 'Write(../other/**)']);
+    for (const r of ['Edit(//etc/hosts)', 'Write(/tmp/x)', 'Edit(~/notes.md)', 'Write(../other/**)']) {
+      expect(chip(body, r)).toContain('outside this folder');
+      expect(chip(body, r)).toContain('hot');
+    }
+  });
+});

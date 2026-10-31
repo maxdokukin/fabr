@@ -76,19 +76,20 @@
     {:else}
       {#if question.kind === 'open'}
         <textarea class="in" rows="3" aria-label="Answer" bind:value={text} disabled={busy}></textarea>
-        <div class="row"><Button variant="primary" disabled={busy || !text.trim()} onclick={() => send({ value: text })}>Send</Button></div>
+        <div class="acts"><Button variant="primary" disabled={busy || !text.trim()} onclick={() => send({ value: text })}>Send</Button></div>
       {:else if question.kind === 'choice'}
         {#if question.prior}
           <p class="prior">Last time: {question.prior.text}{#if priorFrom}<br /><span class="dim">{priorFrom}</span>{/if}</p>
         {/if}
-        <div class="row">
+        <div class="acts">
           <Button variant="primary" disabled={busy} onclick={() => send({ value: 'once' })}>Once</Button>
           <Button variant="primary" disabled={busy} onclick={() => send({ value: 'always' })}>Always</Button>
           <Button on={refusing} disabled={busy} onclick={() => (refusing = !refusing)}>No, something else</Button>
         </div>
+        <p class="dim">Once is for this task. Always reuses this answer next time.</p>
         {#if refusing}
-          <textarea class="in" rows="2" aria-label="Replacement" bind:value={replacement} disabled={busy}></textarea>
-          <div class="row"><Button variant="primary" disabled={busy || !replacement.trim()} onclick={() => send({ value: 'no', replacement })}>Send</Button></div>
+          <textarea class="in" rows="2" aria-label="Replacement" placeholder="What to do instead" bind:value={replacement} disabled={busy}></textarea>
+          <div class="acts"><Button variant="primary" disabled={busy || !replacement.trim()} onclick={() => send({ value: 'no', replacement })}>Send</Button></div>
         {/if}
       {:else}
         <div class="fieldtree">
@@ -103,14 +104,14 @@
           {/each}
         </div>
         <p class="dim">The agent never sees the values. It only gets to fill these fields in the form.</p>
-        <div class="row">
+        <div class="acts">
           <Button variant="primary" disabled={busy} onclick={() => send({ granted: (question.fields ?? []).map((f) => ({ field: f, scope: scopeOf(f) })) })}>Allow</Button>
         </div>
       {/if}
       {#if busy}<p class="dim" role="status">Saving…</p>{/if}
       {#if error}
         <p class="err" role="alert">{error}</p>
-        {#if conflict}<div class="row"><Button onclick={reload}>Reload</Button></div>{/if}
+        {#if conflict}<div class="acts"><Button onclick={reload}>Reload</Button></div>{/if}
       {/if}
     {/if}
   </div>
@@ -122,8 +123,8 @@
   .dim { color: var(--label-2); font-size: var(--fs-12); margin: 0; overflow-wrap: anywhere; }
   .prior { margin: 0; padding: 8px 10px; border: 1px solid var(--sep); border-radius: var(--radius-ctl); overflow-wrap: anywhere; }
   .done { margin: 0; color: var(--green); overflow-wrap: anywhere; }
-  .err { margin: 0; color: var(--red); }
-  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .err { margin: 0; color: var(--error-text); }
+  .acts { display: flex; gap: 8px; flex-wrap: wrap; }
   .in { width: 100%; box-sizing: border-box; font: inherit; padding: 8px 10px; border: 1px solid var(--sep); border-radius: var(--radius-ctl); background: transparent; color: inherit; }
   .fieldtree { display: flex; flex-direction: column; gap: 4px; }
   .head { font-weight: 600; margin-top: 4px; }

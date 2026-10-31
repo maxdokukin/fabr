@@ -1,4 +1,4 @@
-use crate::ccsession::{self, SendReq, SessionsReq, TranscriptReq};
+use crate::ccsession::{self, SendReq, SessionsReq, TrackReq, TrackRes, TranscriptReq};
 use crate::dto::{
     Empty, GetTreeReq, HostReq, InitChildrenReq, InstallKeyReq, ListDirsReq, NodeRef, OpenUrlReq, RemoveNodeReq, RevealPathReq,
     SaveMetaReq, SaveSourcesReq, SourceIdReq, SourcePasswordReq, Stamp,
@@ -6,6 +6,7 @@ use crate::dto::{
 use crate::error::FabrError;
 use crate::fabric::{self, FabricCreateReq, FabricListReq, FabricReadReq, FabricStampReq, FabricWriteReq, ImportTodosReq};
 use crate::knowledge::{self, KnowledgeReadReq, KnowledgeWriteReq, LearnedAlwaysReq, LearnedForgetReq};
+use crate::proposals::{self, ProposalReq, ProposalsReadReq};
 use crate::settings::Settings;
 use crate::setup::{self, CheckReq, Ctx, LinkReq, SecretsWriteReq, SettingsWriteReq};
 use crate::sources::Source;
@@ -115,11 +116,15 @@ ops! {
     fabric_open_claude Post false (OpenClaudeReq) |_, r| Ok(Done::Desktop(Desktop::OpenClaude(r)));
     fabric_cc_sessions Post true (SessionsReq) |_, r| json(ccsession::list(&ccsession::config_dir(), &local_dir(&r.folder)?)?);
     fabric_cc_transcript Post true (TranscriptReq) |_, r| json(ccsession::transcript(&ccsession::config_dir(), &local_dir(&r.folder)?, &r.id, r.limit.unwrap_or(300))?);
+    fabric_cc_track Post true (TrackReq) |_, r| json(TrackRes { path: ccsession::track(&ccsession::config_dir(), &local_dir(&r.folder)?, &r.id)? });
     fabric_cc_send Post true (SendReq) |_, r| json(cc_send(&r)?);
     fabric_knowledge_read Post true (KnowledgeReadReq) |_, r| json(knowledge::read(&local_dir(&r.folder)?)?);
     fabric_knowledge_write Post true (KnowledgeWriteReq) |_, r| json(knowledge::write(&local_dir(&r.folder)?, &r.kind, &r.text)?);
     fabric_learned_forget Post true (LearnedForgetReq) |_, r| json(knowledge::forget(&local_dir(&r.folder)?, &r.id)?);
-    fabric_learned_always Post true (LearnedAlwaysReq) |_, r| json(knowledge::set_always(&local_dir(&r.folder)?, &r.id, r.always)?);
+    fabric_learned_always Post true (LearnedAlwaysReq) |_, r| json(learned_always(&Ctx::from_env(), &r)?);
+    fabric_proposals_read Post true (ProposalsReadReq) |_, r| json(proposals::read(&local_dir(&r.folder)?)?);
+    fabric_proposal_accept Post true (ProposalReq) |_, r| json(proposals::accept(&local_dir(&r.folder)?, &r.id)?);
+    fabric_proposal_dismiss Post true (ProposalReq) |_, r| json(proposals::dismiss(&local_dir(&r.folder)?, &r.id)?);
 }
 
 fn cc_send(r: &SendReq) -> Result<ccsession::SendRes, FabrError> {
@@ -127,6 +132,19 @@ fn cc_send(r: &SendReq) -> Result<ccsession::SendRes, FabrError> {
     let bin =
         ccsession::resolve_bin(&configured).ok_or_else(|| FabrError::NotFound("Claude Code was not found; check it in Settings".into()))?;
     ccsession::send(&bin, &local_dir(&r.folder)?, &r.id, &r.message, std::time::Duration::from_secs(ccsession::SEND_TIMEOUT_S))
+}
+
+pub fn learned_always(ctx: &Ctx, r: &LearnedAlwaysReq) -> Result<knowledge::NodeKnowledge, FabrError> {
+    let folder = local_dir(&r.folder)?;
+    let k = knowledge::set_always(&folder, &r.id, r.always)?;
+    let root = setup::settings_read(ctx).map(|s| std::path::PathBuf::from(s.settings.default_folder)).ok().filter(|_| r.always);
+    if let Some(root) = root
+        && let Some((_, msg)) = knowledge::promote(&root, &folder, &r.id)
+        && let Err(e) = knowledge::announce(&ctx.space(), &knowledge::agents_dir(&root).join("learned.yaml"), &msg)
+    {
+        log::warn!("events.log append failed: {e}");
+    }
+    Ok(k)
 }
 
 fn local_dir(folder: &str) -> Result<std::path::PathBuf, FabrError> {
@@ -229,6 +247,40 @@ mod cc_tests {
         let k = run("fabric_learned_always", json!({"folder": f, "id": "l1", "always": true})).unwrap();
         assert_eq!(k["learned"][0]["always"], json!(true));
         assert!(run("fabric_learned_always", json!({"folder": f, "id": "l2", "always": true})).is_err());
+        assert_eq!(run("fabric_proposals_read", json!({"folder": f})).unwrap(), json!([]));
+        proposals::add(d.path(), "Adding notes", "- write notes.md", "t1", "2026-10-31T00:00:00Z").unwrap();
+        proposals::add(d.path(), "Renaming", "- rename", "t2", "2026-10-31T00:00:00Z").unwrap();
+        assert_eq!(run("fabric_proposals_read", json!({"folder": f})).unwrap()[1]["source_task"], json!("t2"));
+        assert_eq!(run("fabric_proposal_dismiss", json!({"folder": f, "id": "p2"})).unwrap().as_array().unwrap().len(), 1);
+        assert_eq!(run("fabric_proposal_accept", json!({"folder": f, "id": "p1"})).unwrap(), json!([]));
+        assert!(
+            run("fabric_knowledge_read", json!({"folder": f})).unwrap()["knowledge"]
+                .as_str()
+                .unwrap()
+                .contains("### Procedure: Adding notes")
+        );
+        assert!(run("fabric_proposal_accept", json!({"folder": f, "id": "p1"})).is_err());
+    }
+
+    #[test]
+    fn turning_always_on_in_a_second_project_promotes_and_announces() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("fabr");
+        let ctx = Ctx::new(home.path());
+        std::fs::create_dir_all(ctx.space()).unwrap();
+        std::fs::write(ctx.settings_path(), format!("default_folder = \"{}\"\n", root.display())).unwrap();
+        for (dir, always) in [("pets", "true"), ("team-notes", "false")] {
+            std::fs::create_dir_all(root.join(dir).join(".fabric-space/.agents")).unwrap();
+            let yaml = format!("records:\n  - {{id: l3, text: Home, applies_when: Where?, always: {always}}}\n");
+            std::fs::write(root.join(dir).join(".fabric-space/.agents/learned.yaml"), yaml).unwrap();
+        }
+        let req = |always| LearnedAlwaysReq { folder: root.join("team-notes").to_string_lossy().into_owned(), id: "l3".into(), always };
+        learned_always(&ctx, &req(false)).unwrap();
+        assert!(knowledge::read_learned(&root).unwrap().is_empty());
+        assert!(learned_always(&ctx, &req(true)).unwrap().learned[0].always);
+        assert_eq!(knowledge::read_learned(&root).unwrap()[0].scope, "global");
+        let events = std::fs::read_to_string(ctx.space().join("events.log")).unwrap();
+        assert!(events.contains(" learned ") && events.ends_with("promoted l3 to global (confirmed in pets and team-notes)\n"), "{events}");
     }
 
     #[test]

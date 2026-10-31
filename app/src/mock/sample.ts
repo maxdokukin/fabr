@@ -102,3 +102,8 @@ export const VM: Spec[] = [
   ['', { name: 'sample', kind: 'server', show_depth: 1 }, [['todo', null, 'Check printer firmware'], ['working', null, 'Order filament']]],
   ['app', { name: 'app', kind: 'project' }, [['needs_you', 2, 'Order filament spools', 1], ['needs_harness', 3, 'Write release notes to disk (needs write_file)'], ['needs_you', 5, 'Approve the release plan']]],
 ];
+
+export const VM_QA: Spec[] = [
+  VM[0],
+  ['app', { name: 'app', kind: 'project' }, [...VM[1][2]!, ['needs_you', 6, 'Choose the shipping address', 1], ['needs_you', 7, 'Re-plan the release', 1]]],
+];

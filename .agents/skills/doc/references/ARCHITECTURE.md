@@ -38,17 +38,17 @@ Everything above the knowledge layer reads and writes the task record in the fol
 | Core | Agent registry | built | `fabr-agent/src/board.rs`, heartbeat in `runner/` |
 | Core | Notifier | built | `events.log` plus Telegram notices |
 | Agents | Organizer | parallel | not in this repo |
-| Agents | Context gatherer | built | `gather_bundle` in `lifecycle.rs`: folder chain, rules, knowledge, learned answers, file listing |
+| Agents | Context gatherer | built | `gather_bundle` and `past_tasks` in `lifecycle.rs`: folder chain, rules, knowledge, learned answers, file listing, similar past tasks |
 | Agents | Definer | built | planner session, `claude.rs` `define` |
 | Agents | Planner | built | the same session resumed, `claude.rs` `plan`; Inputs, Outputs, Steps |
 | Agents | Executor | built | executor session, `claude.rs` `execute`, acceptEdits in the task folder |
-| Agents | Evaluator | built | allowlisted checks, then a read-only validator session |
-| Agents | Learner | built | `fabr-core/src/knowledge.rs` `capture`: answers to `learned.yaml`; no classification into preference, data or procedure |
+| Agents | Evaluator | built | allowlisted checks, then a read-only validator session; a first failure re-plans once with the evidence |
+| Agents | Learner | built | `fabr-core/src/knowledge.rs` `capture`: answers to `learned.yaml`; after a pass the executor session proposes a procedure into `proposals.yaml` (`proposals.rs`), which the user accepts in node settings |
 | Knowledge | Machine settings | built | `settings.toml`, `secrets.toml` (bot token only) |
 | Knowledge | Global rules and preferences | built | `.fabric-space/.agents/rules.md` and `knowledge.md` at the root, edited in node settings |
 | Knowledge | Project knowledge and preferences | built | the same files in any folder; nearer folder listed first |
 | Knowledge | Learned preferences | built | the planner cites a learned record; define asks once, always or no; always-rules apply silently and show under Assumed |
-| Knowledge | Past executions | planned | wave 2 search over finished records |
+| Knowledge | Past executions | built | `past_tasks` in `lifecycle.rs`: up to 3 finished tasks in the folder chain whose titles share two words, with the result and what the executor did; no full-text search |
 | Private | Personal data bank | planned | no vault, policy or crypto |
 | Private | Fill at the sink | planned | Claude Code has WebFetch; no form filling with granted values |
 | Private | Audit log | planned | comes with fill |
@@ -65,6 +65,6 @@ Everything above the knowledge layer reads and writes the task record in the fol
 - The app hosts the agent runner in-process. It starts when setup has the `folder` and `claude` steps and stops on exit, which also kills any running Claude Code process. `fabr agent` runs the same runner as a debug entry point.
 - A task sheet lists its planner, executor and validator sessions with Open in terminal (`claude --resume <id>` in the task's folder), Copy command and Transcript.
 - The transcript sheet has a read-only chat box that resumes the session headlessly, so the user can discuss a plan with its own planner and then press Redo plan.
-- The CLI covers the same loop for terminal users: `fabr status`, `show`, `delegate`, `answer`, `approve`, `refuse`, `cancel`, `pause` and `resume` write through the GUI's write path with `by: cli`, and `fabr ask <task> --role plan|execute|evaluate` puts a read-only question to one of its sessions.
+- The CLI covers the same loop for terminal users: `fabr status`, `show`, `delegate`, `answer`, `approve`, `refuse`, `cancel`, `pause` and `resume` write through the GUI's write path with `by: cli`, and `fabr ask <task> --role plan|execute|evaluate` puts a read-only question to one of its sessions. `fabr track <folder> <session id>` adds a Claude Code session as a reminder.
 - Node settings list every Claude Code session that ran in that folder, read from `~/.claude/projects/`, with a New session here button, and hold the folder's rules, knowledge and learned answers.
 - The frontend parses records in one place, `app/src/lib/fabric/parse.ts`, and tests against `fixtures/`.

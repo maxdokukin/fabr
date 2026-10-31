@@ -26,6 +26,10 @@ describe('parseEventLine', () => {
     expect(e.taskPath.endsWith('.md')).toBe(true);
     expect(e.text.length).toBeGreaterThan(0);
   });
+  it('parses a promotion notice', () => {
+    const e = parseEventLine('2026-10-31T08:00:00Z learned /f/.fabric-space/.agents/learned.yaml promoted l3 to global (confirmed in pets and team-notes)')!;
+    expect([e.kind, e.text]).toEqual(['learned', 'promoted l3 to global (confirmed in pets and team-notes)']);
+  });
   it('returns null for malformed lines', () => {
     expect(parseEventLine('garbage')).toBeNull();
     expect(parseEventLine('2026-10-24T18:59:31Z exploded /a/b.md text')).toBeNull();

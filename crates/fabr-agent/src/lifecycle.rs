@@ -2,7 +2,8 @@ use crate::board::{Activity, Board, Extras};
 use crate::caps::{Harness, executor_rules, requires_of, valid_rule};
 use crate::claude::{denial_text, is_session_id, rule_for, tool_line};
 use crate::engine::{
-    DefineInput, DraftAssertion, End, Engine, EvaluateInput, ExecStatus, ExecuteInput, Judgement, PlanInput, PlanOut, Run, ToolUse, Watch,
+    DefineInput, DraftAssertion, End, Engine, EvaluateInput, ExecStatus, ExecuteInput, Judgement, PlanInput, PlanOut, ProposeInput, Run,
+    ToolUse, Watch,
 };
 use crate::link::{list_records, load_record, update_record};
 use crate::now_utc;
@@ -23,8 +24,11 @@ pub const MAX_STAGE_ERRORS: u32 = 3;
 pub const MAX_SAME_DENIALS: usize = 3;
 pub const PLAN_SECTIONS: [&str; 3] = ["### Inputs", "### Outputs", "### Steps"];
 const GATHER_FILE_CAP: usize = 8 * 1024;
+const GATHER_PROC_CAP: usize = 16 * 1024;
 const GATHER_TOTAL_CAP: usize = 32 * 1024;
 const GATHER_LIST_CAP: usize = 200;
+const REPLANNED: &str = "replanning after failed check";
+const CHAT_WAIT: &str = "waiting for a chat on this session to finish";
 
 pub struct Ctl {
     pub board: Arc<Board>,
@@ -32,6 +36,9 @@ pub struct Ctl {
     pub harness: Harness,
     pub root: Option<PathBuf>,
     pub max_task_usd: f64,
+    pub replan_on_fail: bool,
+    pub always_review_days: u32,
+    pub propose_procedures: bool,
 }
 
 impl Ctl {
@@ -40,7 +47,16 @@ impl Ctl {
     }
 
     pub fn with_board(board: Arc<Board>, check_timeout_s: u64) -> Ctl {
-        Ctl { board, check_timeout_s, harness: Harness::standard(), root: None, max_task_usd: 0.0 }
+        Ctl {
+            board,
+            check_timeout_s,
+            harness: Harness::standard(),
+            root: None,
+            max_task_usd: 0.0,
+            replan_on_fail: true,
+            always_review_days: 90,
+            propose_procedures: true,
+        }
     }
 }
 
@@ -313,7 +329,9 @@ fn step_once(node_dir: &Path, record_path: &Path, ctl: &Ctl, engine: &impl Engin
             rec.state = State::InProgress;
             rec.step = Some(Step::Execute);
             rec.waiting = false;
-            rec.sessions.execute = None;
+            if !replanned(&rec) {
+                rec.sessions.execute = None;
+            }
             rec.sessions.evaluate = None;
             append_log(&mut rec.log, "execute", "started");
             persist(record_path, &mut rec, &mut base)?;
@@ -329,12 +347,12 @@ fn step_once(node_dir: &Path, record_path: &Path, ctl: &Ctl, engine: &impl Engin
             }
             match rec.step {
                 Some(Step::Evaluate) => evaluate_stage(&cx, &mut rec, &mut base, engine),
-                Some(Step::Learn | Step::Notify) => tail_step(&cx, &mut rec, &mut base),
+                Some(Step::Learn | Step::Notify) => tail_step(&cx, &mut rec, &mut base, engine),
                 _ => execute_stage(&cx, &mut rec, &mut base, engine),
             }
         }
         State::Succeeded | State::Failed => match rec.step {
-            Some(Step::Learn | Step::Notify) => tail_step(&cx, &mut rec, &mut base),
+            Some(Step::Learn | Step::Notify) => tail_step(&cx, &mut rec, &mut base, engine),
             _ => {
                 forget(ctl, &rec, record_path);
                 Ok(())
@@ -354,9 +372,13 @@ impl Cx<'_> {
         mark(self.ctl, self.node_dir, self.record_path, rec, activity);
     }
 
+    fn over_cap(&self, rec: &TaskRecord) -> bool {
+        self.ctl.max_task_usd > 0.0 && rec.cost_usd >= self.ctl.max_task_usd
+    }
+
     fn blocked(&self, rec: &mut TaskRecord, base: &mut TaskRecord, label: &str, resume: Option<&str>) -> Result<bool, FabrError> {
         let cap = self.ctl.max_task_usd;
-        if cap > 0.0 && rec.cost_usd >= cap {
+        if self.over_cap(rec) {
             rec.state = State::Failed;
             rec.step = None;
             rec.waiting = false;
@@ -370,9 +392,8 @@ impl Cx<'_> {
         if !resume.is_some_and(|id| chat_running(self.node_dir, id)) {
             return Ok(false);
         }
-        let note = "waiting for a chat on this session to finish";
-        if log_message(rec.log.lines().last().unwrap_or(""), label) != Some(note) {
-            append_log(&mut rec.log, label, note);
+        if log_message(rec.log.lines().last().unwrap_or(""), label) != Some(CHAT_WAIT) {
+            append_log(&mut rec.log, label, CHAT_WAIT);
             persist(self.record_path, rec, base)?;
         }
         self.mark(rec, Activity::Queued);
@@ -384,14 +405,33 @@ pub fn chat_running(node_dir: &Path, session: &str) -> bool {
     if !is_session_id(session) {
         return false;
     }
-    let lock = node_dir.join(".fabric-space").join("chat").join(format!("{session}.lock"));
+    let lock = fabr_core::ccsession::chat_marker(node_dir, session);
     let Ok(text) = std::fs::read_to_string(&lock) else { return false };
-    let pid = text.split_whitespace().next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
-    if crate::pgroup::alive(pid) {
+    let pid = text.split_whitespace().next().and_then(|p| p.parse::<u32>().ok());
+    if pid.map_or_else(|| fabr_core::ccsession::marker_fresh(&lock), crate::pgroup::alive) {
         return true;
     }
     let _ = std::fs::remove_file(&lock);
     false
+}
+
+pub fn replanned(rec: &TaskRecord) -> bool {
+    rec.log.lines().any(|l| log_message(l, "evaluate").is_some_and(|m| m.starts_with(REPLANNED)))
+}
+
+fn failed_checks(rec: &TaskRecord) -> Option<String> {
+    let verdict = rec.verdict.as_ref().filter(|v| v.result == "fail" && replanned(rec))?;
+    let check = |id: &str| id.strip_prefix('c').is_some_and(|n| n.parse::<u32>().is_ok());
+    let current = |id: &str| rec.assertions.iter().any(|a| a.id == id) || check(id);
+    let lines: Vec<String> =
+        verdict.items.iter().filter(|i| !i.pass && current(&i.id)).map(|i| format!("- {}: {}", i.id, i.evidence)).collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+fn revised_plan_delivered(rec: &TaskRecord) -> bool {
+    let lines: Vec<&str> = rec.log.lines().collect();
+    let Some(i) = lines.iter().rposition(|l| log_message(l, "evaluate").is_some_and(|m| m.starts_with(REPLANNED))) else { return false };
+    lines[i + 1..].iter().filter_map(|l| log_message(l, "execute")).any(|m| is_tool_line(m) || m.starts_with("done: "))
 }
 
 fn session_of(id: &Option<String>) -> Option<String> {
@@ -544,15 +584,24 @@ pub fn apply_redo(rec: &mut TaskRecord, stage: RedoStage) {
     rec.needs = None;
 }
 
-fn tail_step(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord) -> Result<(), FabrError> {
+fn tail_step(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, engine: &impl Engine) -> Result<(), FabrError> {
     if rec.step == Some(Step::Learn) {
-        rec.step = Some(Step::Notify);
         let msg = match knowledge::capture(&folder_chain(cx.node_dir, cx.ctl.root.as_deref()), cx.record_path, rec, &now_utc()) {
             Ok(0) => "nothing new".to_string(),
             Ok(n) => format!("captured {n} answer{}", if n == 1 { "" } else { "s" }),
             Err(e) => format!("capture failed: {}", clean_message(&e.message(), 160)),
         };
         append_log(&mut rec.log, "learn", &msg);
+        let passed = rec.state == State::Succeeded && rec.verdict.as_ref().is_some_and(|v| v.result == "pass");
+        if cx.ctl.propose_procedures && passed {
+            let msg = match propose(cx, rec, base, engine) {
+                Ok(Some(id)) => format!("proposed {id}"),
+                Ok(None) => "no proposal (already proposed or accepted)".to_string(),
+                Err(why) => format!("no proposal ({})", clean_message(&why, 120)),
+            };
+            append_log(&mut rec.log, "learn", &msg);
+        }
+        rec.step = Some(Step::Notify);
         persist(cx.record_path, rec, base)?;
         cx.mark(rec, Activity::Tool);
         return Ok(());
@@ -565,6 +614,33 @@ fn tail_step(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord) -> Result<(),
     Ok(())
 }
 
+fn propose(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, engine: &impl Engine) -> Result<Option<String>, String> {
+    let Some(session) = session_of(&rec.sessions.execute) else { return Err("no executor session".into()) };
+    if cx.over_cap(rec) {
+        return Err("task spend cap reached".into());
+    }
+    if chat_running(cx.node_dir, &session) {
+        return Err("a chat is open on the executor session".into());
+    }
+    let title = rec.title.clone();
+    cx.mark(rec, Activity::Model);
+    let input = ProposeInput { cwd: cx.node_dir, resume: &session, title: &title };
+    let run = engine.propose(&input, &mut Live { cx, rec, base, slot: Slot::Execute, label: "learn", log_tools: false });
+    if run.cost_usd > 0.0 {
+        rec.cost_usd = ((rec.cost_usd + run.cost_usd) * 1e6).round() / 1e6;
+    }
+    cx.ctl.board.spent(&rec.id, "learn", run.session_id.as_deref(), &run.usage, run.cost_usd);
+    let out = match run.end {
+        End::Done(out) => out,
+        End::Stopped => return Err("run stopped".into()),
+        End::Failed(e) => return Err(e.message()),
+    };
+    if !out.worth_saving {
+        return Err("not worth saving".into());
+    }
+    fabr_core::proposals::add(cx.node_dir, &out.applies_when, &out.steps, &rec.id, &now_utc()).map_err(|e| e.message())
+}
+
 fn gather_stage(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord) -> Result<(), FabrError> {
     let mut view = rec.clone();
     view.step = Some(Step::Gather);
@@ -572,7 +648,9 @@ fn gather_stage(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord) -> Result<
     if rec.context.trim().is_empty() {
         rec.by.context = Some(Author::Agent);
     }
-    append_gathered(&mut rec.context, &gather_bundle(cx.node_dir, cx.ctl.root.as_deref()));
+    let mut bundle = gather_bundle(cx.node_dir, cx.ctl.root.as_deref());
+    bundle.push_str(&past_tasks(cx.node_dir, cx.ctl.root.as_deref(), &rec.title, &rec.id));
+    append_gathered(&mut rec.context, &bundle);
     rec.step = Some(Step::Define);
     rec.waiting = false;
     append_log(&mut rec.log, "gather", "context bundle written");
@@ -613,12 +691,85 @@ pub fn demote(text: &str, level: usize) -> String {
 }
 
 fn capped_text(path: &Path, cap: usize) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
+    cap_bytes(&std::fs::read(path).ok()?, cap)
+}
+
+fn cap_bytes(bytes: &[u8], cap: usize) -> Option<String> {
     let text = String::from_utf8_lossy(&bytes[..bytes.len().min(cap)]).trim().to_string();
     if text.is_empty() {
         return None;
     }
     Some(if bytes.len() > cap { format!("{text}\n(cut at {cap} bytes)") } else { text })
+}
+
+fn knowledge_text(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() <= GATHER_FILE_CAP {
+        return cap_bytes(&bytes, GATHER_FILE_CAP);
+    }
+    let (mut procs, mut rest, mut in_proc) = (String::new(), String::new(), false);
+    for line in String::from_utf8_lossy(&bytes).lines() {
+        let t = line.trim_start();
+        if t.starts_with("### Procedure:") {
+            in_proc = true;
+        } else if t.starts_with('#') {
+            in_proc = false;
+        }
+        let into = if in_proc { &mut procs } else { &mut rest };
+        into.push_str(line);
+        into.push('\n');
+    }
+    let procs = cap_bytes(procs.as_bytes(), GATHER_PROC_CAP);
+    let rest = cap_bytes(rest.as_bytes(), GATHER_FILE_CAP);
+    Some([procs, rest].into_iter().flatten().collect::<Vec<_>>().join("\n\n"))
+}
+
+const PAST_TASKS_MAX: usize = 3;
+const STOP_WORDS: [&str; 12] = ["with", "from", "into", "that", "this", "then", "them", "make", "write", "the", "and", "for"];
+
+fn title_words(title: &str) -> Vec<String> {
+    let mut out: Vec<String> = title
+        .split(|c: char| !c.is_alphanumeric())
+        .map(str::to_lowercase)
+        .filter(|w| w.chars().count() >= 3 && !STOP_WORDS.contains(&w.as_str()))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+pub fn past_tasks(node_dir: &Path, root: Option<&Path>, title: &str, own_id: &str) -> String {
+    let want = title_words(title);
+    if want.is_empty() {
+        return String::new();
+    }
+    let mut found: Vec<(usize, String, String)> = Vec::new();
+    for dir in folder_chain(node_dir, root) {
+        let Ok(records) = list_records(&dir) else { continue };
+        for (_, r) in records {
+            if r.id == own_id || !matches!(r.state, State::Succeeded | State::Failed) {
+                continue;
+            }
+            let have = title_words(&r.title);
+            let shared = want.iter().filter(|w| have.contains(w)).count();
+            if shared < 2.min(want.len()) {
+                continue;
+            }
+            let result = r.verdict.as_ref().map_or(state_name(r.state).to_string(), |v| v.result.clone());
+            let done = r.log.lines().rev().find_map(|l| l.split_once(" execute: done: ").map(|(_, t)| t.to_string())).unwrap_or_default();
+            let mut line = format!("- {} ({}, {result})", demote(&r.title, 5), r.updated_at.get(..10).unwrap_or(""));
+            if !done.is_empty() {
+                line.push_str(&format!(": {}", demote(&done.chars().take(240).collect::<String>(), 5)));
+            }
+            found.push((shared, r.updated_at.clone(), line));
+        }
+    }
+    if found.is_empty() {
+        return String::new();
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    let lines: Vec<String> = found.into_iter().take(PAST_TASKS_MAX).map(|f| f.2).collect();
+    format!("#### Similar past tasks\n{}\n", lines.join("\n"))
 }
 
 pub fn gather_bundle(node_dir: &Path, root: Option<&Path>) -> String {
@@ -637,7 +788,10 @@ pub fn gather_bundle(node_dir: &Path, root: Option<&Path>) -> String {
     for (file, heading) in [("rules.md", "#### Rules"), ("knowledge.md", "#### Knowledge")] {
         let mut part = String::new();
         for (i, dir) in chain.iter().enumerate() {
-            let Some(text) = capped_text(&dir.join(".fabric-space").join(".agents").join(file), GATHER_FILE_CAP) else { continue };
+            let path = dir.join(".fabric-space").join(".agents").join(file);
+            let Some(text) = (if file == "knowledge.md" { knowledge_text(&path) } else { capped_text(&path, GATHER_FILE_CAP) }) else {
+                continue;
+            };
             let block = format!("From {}:\n{}\n\n", label(dir, i), demote(&text, 5));
             if used + block.len() > GATHER_TOTAL_CAP {
                 cut = true;
@@ -651,11 +805,16 @@ pub fn gather_bundle(node_dir: &Path, root: Option<&Path>) -> String {
         }
     }
     let mut learned = String::new();
-    for (i, dir) in chain.iter().enumerate() {
-        for r in knowledge::read_learned(dir).unwrap_or_default() {
-            let when = if r.applies_when.is_empty() { String::new() } else { format!("when {}: ", demote(&r.applies_when, 5)) };
+    let records: Vec<Vec<Learned>> = chain.iter().map(|d| knowledge::read_learned(d).unwrap_or_default()).collect();
+    let globals: Vec<&Learned> = records.iter().flatten().filter(|g| g.scope == knowledge::GLOBAL).collect();
+    for (i, (dir, list)) in chain.iter().zip(&records).enumerate() {
+        for r in list {
+            if r.scope != knowledge::GLOBAL && globals.iter().any(|g| knowledge::same(g, r)) {
+                continue;
+            }
             let always = if r.always { " (always)" } else { "" };
-            let line = format!("- {}{always}: {when}{} (learned in {}, confirmed {}x)\n", r.id, demote(&r.text, 5), label(dir, i), r.count);
+            let from = if r.scope == knowledge::GLOBAL { "global".to_string() } else { format!("learned in {}", label(dir, i)) };
+            let line = format!("- {}{always}: {} ({from}, confirmed {}x)\n", r.id, learned_body(r), r.count);
             if used + line.len() > GATHER_TOTAL_CAP {
                 cut = true;
                 continue;
@@ -699,6 +858,20 @@ pub fn gather_bundle(node_dir: &Path, root: Option<&Path>) -> String {
     out.push_str(&if lines.is_empty() { "(empty)".to_string() } else { lines.join("\n") });
     out.push('\n');
     out
+}
+
+fn learned_body(r: &Learned) -> String {
+    let when = if r.applies_when.is_empty() { String::new() } else { format!("when {}: ", demote(&r.applies_when, 5)) };
+    format!("{when}{}", demote(&r.text, 5))
+}
+
+fn gathered_shows(context: &str, r: &Learned) -> bool {
+    let body = format!(": {} (", learned_body(r));
+    context.lines().any(|l| {
+        l.strip_prefix("- ")
+            .and_then(|l| l.strip_prefix(r.id.as_str()))
+            .is_some_and(|rest| (rest.starts_with(": ") || rest.starts_with(" (always): ")) && rest.contains(&body))
+    })
 }
 
 fn append_gathered(context: &mut String, bundle: &str) {
@@ -778,12 +951,17 @@ fn ask(rec: &mut TaskRecord, label: &str, text: String) {
     append_log(&mut rec.log, label, &format!("asked {id}"));
 }
 
-fn ask_prior(rec: &mut TaskRecord, text: Option<String>, r: &Learned) {
+fn ask_prior(rec: &mut TaskRecord, text: Option<String>, r: &Learned, stale: bool) {
     let id = next_question_id(rec);
+    let mut text = text.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).unwrap_or_else(|| "Same as last time?".into());
+    let last = r.last_confirmed.as_deref().map(|d| d.get(..10).unwrap_or(d)).unwrap_or_default();
+    if stale {
+        text = format!("{text} Last confirmed {last}.");
+    }
     rec.question = Some(Question {
         id: id.clone(),
         kind: "choice".into(),
-        text: text.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).unwrap_or_else(|| "Same as last time?".into()),
+        text,
         options: Some(["once", "always", "no"].map(String::from).to_vec()),
         prior: Some(Prior { text: r.text.clone(), source_task: r.source_tasks.first().cloned(), last_confirmed: r.last_confirmed.clone() }),
         fields: None,
@@ -791,7 +969,8 @@ fn ask_prior(rec: &mut TaskRecord, text: Option<String>, r: &Learned) {
         answer: None,
     });
     rec.waiting = true;
-    append_log(&mut rec.log, "define", &format!("asked {id} about {}", r.id));
+    let note = if stale { format!(", last confirmed {last}") } else { String::new() };
+    append_log(&mut rec.log, "define", &format!("asked {id} about {}{note}", r.id));
 }
 
 fn assume(rec: &mut TaskRecord, r: &Learned) {
@@ -805,27 +984,59 @@ fn prior_asked(rec: &TaskRecord, r: &Learned) -> bool {
     rec.answers.iter().any(|q| q.kind == "choice" && q.prior.as_ref().is_some_and(|p| p.text == r.text))
 }
 
+fn asked_rule(chain: &[PathBuf], log: &str, q: &Question) -> Option<(PathBuf, Learned)> {
+    let text = &q.prior.as_ref()?.text;
+    let asked = format!("asked {} about ", q.id);
+    let id = log.lines().rev().find_map(|l| log_message(l, "define")?.strip_prefix(asked.as_str())?.split([',', ' ']).next());
+    id.and_then(|id| knowledge::find_cited(chain, id, |r| r.text == *text))
+        .filter(|(_, r)| r.text == *text)
+        .or_else(|| knowledge::find(chain, |r| r.text == *text))
+}
+
+fn choices(rec: &TaskRecord, value: Option<&str>) -> Vec<Question> {
+    let pick = |q: &&Question| q.kind == "choice" && q.answer.as_ref().is_some_and(|a| value.is_none_or(|v| a.value.as_deref() == Some(v)));
+    rec.answers.iter().filter(pick).cloned().collect()
+}
+
 fn always_chosen(cx: &Cx, rec: &mut TaskRecord) {
-    let chosen: Vec<(String, String)> = rec
-        .answers
-        .iter()
-        .filter(|q| q.kind == "choice" && q.answer.as_ref().is_some_and(|a| a.value.as_deref() == Some("always")))
-        .filter_map(|q| Some((q.id.clone(), q.prior.as_ref()?.text.clone())))
-        .collect();
+    let chosen = choices(rec, Some("always"));
     if chosen.is_empty() {
         return;
     }
     let chain = folder_chain(cx.node_dir, cx.ctl.root.as_deref());
-    for (qid, text) in chosen {
-        let Some((dir, r)) = knowledge::find(&chain, |r| r.text == text) else { continue };
-        let note = format!("{qid} set {} to always", r.id);
+    for q in chosen {
+        let Some((dir, r)) = asked_rule(&chain, &rec.log, &q) else { continue };
+        let note = format!("{} set {} to always", q.id, r.id);
         if !r.always && !rec.log.contains(&note) {
             match knowledge::set_always(&dir, &r.id, true) {
-                Ok(_) => append_log(&mut rec.log, "define", &note),
+                Ok(_) => {
+                    append_log(&mut rec.log, "define", &note);
+                    if let Some((_, msg)) = cx.ctl.root.as_deref().and_then(|root| knowledge::promote(root, &dir, &r.id)) {
+                        append_log(&mut rec.log, "learn", &msg);
+                    }
+                }
                 Err(e) => log::warn!("could not set {} to always: {}", r.id, e.message()),
             }
         }
         assume(rec, &r);
+    }
+}
+
+fn reviewed(cx: &Cx, rec: &mut TaskRecord) {
+    let answered = choices(rec, None);
+    if answered.is_empty() {
+        return;
+    }
+    let chain = folder_chain(cx.node_dir, cx.ctl.root.as_deref());
+    let now = now_utc();
+    for q in answered {
+        let Some(value) = q.answer.as_ref().and_then(|a| a.value.clone()) else { continue };
+        let Some((_, r)) = asked_rule(&chain, &rec.log, &q) else { continue };
+        let keep = value != "no";
+        for id in knowledge::review(&chain, &r, keep, cx.ctl.always_review_days, &now) {
+            let what = if keep { "refreshed" } else { "cleared always on" };
+            append_log(&mut rec.log, "define", &format!("{} {what} {id}", q.id));
+        }
     }
 }
 
@@ -843,6 +1054,7 @@ fn define_stage(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, engine: &i
         return Ok(());
     }
     fold_question(rec);
+    reviewed(cx, rec);
     always_chosen(cx, rec);
     let spec_human = rec.by.spec == Some(Author::Human);
     let success_human = rec.by.success == Some(Author::Human);
@@ -863,20 +1075,22 @@ fn define_stage(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, engine: &i
     let input = DefineInput { cwd: cx.node_dir, resume: resume.as_deref(), title: &title, context: &context, answers: &answers };
     let run = engine.define(&input, &mut Live { cx, rec, base, slot: Slot::Plan, label: "define", log_tools: false });
     let Some(draft) = settle(cx, rec, base, Slot::Plan, "define", run)? else { return Ok(()) };
+    let chain = folder_chain(cx.node_dir, cx.ctl.root.as_deref());
     let cited = draft
         .prior_id
         .as_deref()
         .map(str::trim)
         .filter(|id| !id.is_empty())
-        .and_then(|id| knowledge::find(&folder_chain(cx.node_dir, cx.ctl.root.as_deref()), |r| r.id == id).map(|(_, r)| r));
+        .and_then(|id| knowledge::find_cited(&chain, id, |r| gathered_shows(&context, r)).map(|(_, r)| r));
+    let stale = cited.as_ref().is_some_and(|r| knowledge::stale(r, cx.ctl.always_review_days, &now_utc()));
     match cited {
-        Some(r) if r.always => {
+        Some(r) if r.always && !stale => {
             assume(rec, &r);
             append_log(&mut rec.log, "define", &format!("assumed {} (always)", r.id));
         }
         Some(r) if !prior_asked(rec, &r) => {
             rec.step = Some(Step::Define);
-            ask_prior(rec, draft.prior_question, &r);
+            ask_prior(rec, draft.prior_question, &r, stale);
             persist(cx.record_path, rec, base)?;
             cx.mark(rec, Activity::Parked);
             return Ok(());
@@ -929,14 +1143,14 @@ fn define_stage(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, engine: &i
     Ok(())
 }
 
-fn run_plan(
-    cx: &Cx,
-    rec: &mut TaskRecord,
-    base: &mut TaskRecord,
-    engine: &impl Engine,
-    note: Option<&str>,
-    rejection: Option<&str>,
-) -> Result<Option<PlanOut>, FabrError> {
+struct Asks<'a> {
+    note: Option<&'a str>,
+    failed: Option<&'a str>,
+    human: Option<&'a str>,
+    rejection: Option<&'a str>,
+}
+
+fn run_plan(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, engine: &impl Engine, asks: &Asks) -> Result<Option<PlanOut>, FabrError> {
     let allowed = cx.ctl.harness.planning();
     let r = rec.clone();
     let resume = session_of(&r.sessions.plan);
@@ -953,8 +1167,10 @@ fn run_plan(
         success: &r.success,
         assertions: &r.assertions,
         answers: &answers,
-        refusal_note: note,
-        rejection,
+        refusal_note: asks.note,
+        failed: asks.failed,
+        human_plan: asks.human,
+        rejection: asks.rejection,
         allowed_tools: &allowed.tools,
         allowed_checks: &allowed.checks,
     };
@@ -976,41 +1192,48 @@ fn plan_problem(draft: &PlanOut, meta: &PlanMeta, plan_kept: bool) -> Option<Str
 
 fn plan_stage(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, engine: &impl Engine, refused: bool) -> Result<(), FabrError> {
     let note = if refused { Some(rec.approval.as_ref().and_then(|a| a.note.clone()).unwrap_or_default()) } else { None };
+    let failed = failed_checks(rec);
+    let before = approval_digest(rec);
     let mut view = rec.clone();
     view.step = Some(Step::Plan);
     cx.mark(&view, Activity::Model);
     let human_plan = rec.by.plan == Some(Author::Human) && !rec.plan.trim().is_empty();
-    let kept = if human_plan { rec.plan_meta.clone().filter(|m| !m.checks.is_empty()) } else { None };
+    let revise = refused || failed.is_some();
+    let kept = if human_plan && !revise { rec.plan_meta.clone().filter(|m| !m.checks.is_empty()) } else { None };
+    let human = human_plan.then(|| rec.plan.clone());
+    let keeps = |d: &PlanOut| human.as_deref().is_some_and(|h| !revise || d.plan.trim().is_empty() || demote(d.plan.trim(), 3) == h.trim());
+    let grounds = |d: &PlanOut, kept: bool| if kept { format!("{}\n{}", human.as_deref().unwrap_or(""), d.plan) } else { d.plan.clone() };
     let (mut meta, draft) = match kept {
         Some(meta) => (meta, None),
         None => {
-            let Some(mut draft) = run_plan(cx, rec, base, engine, note.as_deref(), None)? else { return Ok(()) };
-            let mut meta = meta_of(&draft, human_plan)?;
-            ground_checks(cx.node_dir, &mut meta, &draft.plan, &mut rec.log);
-            if let Some(problem) = plan_problem(&draft, &meta, human_plan) {
+            let asks = |rejection| Asks { note: note.as_deref(), failed: failed.as_deref(), human: human.as_deref(), rejection };
+            let Some(mut draft) = run_plan(cx, rec, base, engine, &asks(None))? else { return Ok(()) };
+            let mut kept = keeps(&draft);
+            let mut meta = meta_of(&draft, kept)?;
+            ground_checks(cx.node_dir, &mut meta, &grounds(&draft, kept), &mut rec.log);
+            if let Some(problem) = plan_problem(&draft, &meta, kept) {
                 let allowed = cx.ctl.harness.planning();
                 let rejection =
                     format!("{problem}; allowed tools: {}; allowed checks: {}", allowed.tools.join(", "), allowed.checks.join(", "));
                 append_log(&mut rec.log, "plan", &format!("retry after rejection: {}", clean_message(&problem, 200)));
-                let Some(again) = run_plan(cx, rec, base, engine, note.as_deref(), Some(&rejection))? else { return Ok(()) };
+                let Some(again) = run_plan(cx, rec, base, engine, &asks(Some(&rejection)))? else { return Ok(()) };
                 draft = again;
-                meta = meta_of(&draft, human_plan)?;
-                ground_checks(cx.node_dir, &mut meta, &draft.plan, &mut rec.log);
+                kept = keeps(&draft);
+                meta = meta_of(&draft, kept)?;
+                ground_checks(cx.node_dir, &mut meta, &grounds(&draft, kept), &mut rec.log);
             }
             let missing = missing_sections(&draft.plan);
-            if !human_plan && !missing.is_empty() {
+            if !kept && !missing.is_empty() {
                 persist(cx.record_path, rec, base)?;
                 return Err(FabrError::BadRequest(format!("the plan is missing {}", missing.join(", "))));
             }
-            (meta, Some(draft))
+            (meta, (!kept).then_some(draft))
         }
     };
     meta.requires = requires_of(&meta);
     meta.assumptions = rec.plan_meta.as_ref().map(|m| m.assumptions.clone()).unwrap_or_default();
     let invalid = validate_plan(&meta).err();
-    if let Some(draft) = draft
-        && !human_plan
-    {
+    if let Some(draft) = draft {
         rec.plan = demote(draft.plan.trim(), 3);
         rec.by.plan = Some(Author::Agent);
     }
@@ -1022,11 +1245,18 @@ fn plan_stage(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, engine: &imp
     }
     rec.plan_meta = Some(meta);
     let digest = approval_digest(rec);
+    let unchanged = digest == before;
     rec.approval = Some(Approval { status: "pending".into(), by: None, at: None, note: None, digest: Some(digest) });
     rec.state = State::Defined;
     rec.step = Some(Step::Approve);
     rec.waiting = true;
-    append_log(&mut rec.log, "plan", if refused { "redrafted" } else { "plan written" });
+    let done = match (refused, failed.is_some()) {
+        (true, _) => "redrafted",
+        (false, true) if unchanged => "unchanged after failed check",
+        (false, true) => "redrafted after failed check",
+        (false, false) => "plan written",
+    };
+    append_log(&mut rec.log, "plan", done);
     persist(cx.record_path, rec, base)?;
     cx.mark(rec, Activity::Model);
     Ok(())
@@ -1200,6 +1430,7 @@ fn execute_stage(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, engine: &
         return Ok(());
     }
     let r = rec.clone();
+    let failed = failed_checks(&r).filter(|_| !revised_plan_delivered(&r));
     let allowed = executor_rules(r.plan_meta.as_ref());
     let answers = answers_text(&r);
     let input = ExecuteInput {
@@ -1212,6 +1443,7 @@ fn execute_stage(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, engine: &
         answers: &answers,
         allowed: &allowed,
         read_only: cx.ctl.harness.read_only(),
+        failed: failed.as_deref(),
     };
     persist(cx.record_path, rec, base)?;
     cx.mark(rec, Activity::Model);
@@ -1246,7 +1478,11 @@ fn execute_stage(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, engine: &
         let (mut whats, mut lines, mut offer, mut granted) = (Vec::new(), Vec::new(), Vec::new(), false);
         for d in &denials {
             let what = denial_text(cx.node_dir, d);
-            let line = match rule_for(cx.node_dir, d) {
+            let loggable = |rule: &String| {
+                let raw = format!("denied {rule}");
+                clean_message(&raw, 200) == raw
+            };
+            let line = match rule_for(cx.node_dir, d).filter(loggable) {
                 Some(rule) => {
                     if have.contains(&rule) {
                         granted = true;
@@ -1341,11 +1577,21 @@ fn evaluate_stage(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, engine: 
         let pass = items.iter().all(|i| i.pass);
         (items, pass)
     };
+    let failed: Vec<String> = items.iter().filter(|i| !i.pass).map(|i| i.id.clone()).collect();
     rec.verdict = Some(Verdict { result: if pass { "pass" } else { "fail" }.into(), at: now_utc(), items });
-    rec.state = if pass { State::Succeeded } else { State::Failed };
-    rec.step = Some(Step::Learn);
     rec.waiting = false;
     append_log(&mut rec.log, "evaluate", if pass { "verdict pass" } else { "verdict fail" });
+    if !pass && !failed.is_empty() && cx.ctl.replan_on_fail && !replanned(rec) && !cx.over_cap(rec) {
+        rec.state = State::Task;
+        rec.step = Some(Step::Plan);
+        rec.approval = None;
+        append_log(&mut rec.log, "evaluate", &format!("{REPLANNED} ({})", failed.join(", ")));
+        persist(cx.record_path, rec, base)?;
+        cx.mark(rec, Activity::Model);
+        return Ok(());
+    }
+    rec.state = if pass { State::Succeeded } else { State::Failed };
+    rec.step = Some(Step::Learn);
     persist(cx.record_path, rec, base)?;
     cx.mark(rec, Activity::Tool);
     Ok(())
@@ -1474,6 +1720,36 @@ mod answers_in_context {
     }
 
     #[test]
+    fn similar_finished_tasks_up_the_chain_are_listed_with_what_was_done() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let node = root.join("pets");
+        let put = |dir: &Path, title: &str, state: State, done: &str| {
+            let mut r = crate::link::test_reminder(title);
+            r.id = title.replace(' ', "-");
+            r.state = state;
+            r.updated_at = "2026-10-20T10:00:00Z".into();
+            if !done.is_empty() {
+                r.log = format!("- 2026-10-20T10:00:00Z execute: done: {done}\n");
+            }
+            let tasks = dir.join(".fabric-space/tasks");
+            std::fs::create_dir_all(&tasks).unwrap();
+            std::fs::write(tasks.join(format!("{}.md", r.id)), fabr_core::taskrec::render(&r)).unwrap();
+        };
+        put(&node, "order dog food online", State::Succeeded, "ordered Acme Kibble 5 kg");
+        put(&root, "order cat food", State::Failed, "");
+        put(&node, "order dog food again", State::Task, "");
+        put(&node, "water the plants", State::Succeeded, "watered");
+        let out = past_tasks(&node, Some(&root), "Order the dog food for this week", "order-dog-food-again");
+        assert!(
+            out.starts_with("#### Similar past tasks\n- order dog food online (2026-10-20, succeeded): ordered Acme Kibble 5 kg"),
+            "{out}"
+        );
+        assert!(out.contains("order cat food (2026-10-20, failed)") && !out.contains("plants") && !out.contains("again"), "{out}");
+        assert!(past_tasks(&node, Some(&root), "the and", "x").is_empty());
+    }
+
+    #[test]
     fn gather_walks_the_folder_chain_nearest_first_and_stays_bounded() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("root");
@@ -1503,7 +1779,70 @@ mod answers_in_context {
         agents(&node, "knowledge.md", &"x".repeat(40_000));
         let big = gather_bundle(&node, Some(&root));
         assert!(big.len() < 34 * 1024 && big.contains("(cut at 8192 bytes)"), "{}", big.len());
+        let procs = "### Procedure: Late one\n- do the late thing";
+        agents(&node, "knowledge.md", &format!("{}\n\n{procs}\n", "x".repeat(40_000)));
+        let late = gather_bundle(&node, Some(&root));
+        assert!(
+            late.contains("Procedure: Late one") && late.contains("do the late thing") && late.contains("(cut at 8192 bytes)"),
+            "{}",
+            late.len()
+        );
         assert_eq!(folder_chain(&node, None), vec![node.canonicalize().unwrap()]);
         assert_eq!(folder_chain(&node, Some(&tmp.path().join("outside"))).len(), 1);
+    }
+
+    #[test]
+    fn a_global_record_is_listed_once_and_shadows_its_project_copies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let node = root.join("pets");
+        let learned = |dir: &Path, text: &str| {
+            std::fs::create_dir_all(dir.join(".fabric-space/.agents")).unwrap();
+            std::fs::write(dir.join(".fabric-space/.agents/learned.yaml"), text).unwrap();
+        };
+        learned(&node, "records:\n  - {id: l3, text: Ship to  home, applies_when: Where?, always: true}\n  - {id: l4, text: Blue box}\n");
+        learned(&root, "records:\n  - {id: g1, text: ship to home, applies_when: where?, scope: global, count: 5, always: true}\n");
+        let out = gather_bundle(&node, Some(&root));
+        assert!(out.contains("- l4: Blue box (learned in pets (this folder), confirmed 1x)\n"), "{out}");
+        assert!(out.contains("- g1 (always): when where?: ship to home (global, confirmed 5x)\n"), "{out}");
+        assert!(!out.contains("l3"), "{out}");
+        learned(&root, "records:\n  - {id: g1, text: ship to home, applies_when: where?, scope: global, count: 5}\n");
+        let out = gather_bundle(&node, Some(&root));
+        assert!(out.contains("- g1: when where?: ship to home (global") && !out.contains("l3"), "{out}");
+    }
+
+    #[test]
+    fn a_cited_id_resolves_to_the_record_gather_showed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let node = root.join("pets");
+        let learned = |dir: &Path, text: &str| {
+            std::fs::create_dir_all(dir.join(".fabric-space/.agents")).unwrap();
+            std::fs::write(dir.join(".fabric-space/.agents/learned.yaml"), text).unwrap();
+        };
+        learned(&root, "records:\n  - {id: l1, text: UPS, applies_when: Which carrier?, always: true}\n");
+        std::fs::create_dir_all(&node).unwrap();
+        let context = gather_bundle(&node, Some(&root));
+        learned(&node, "records:\n  - {id: l1, text: Blue box}\n");
+        let chain = folder_chain(&node, Some(&root));
+        let (dir, r) = knowledge::find_cited(&chain, "l1", |r| gathered_shows(&context, r)).unwrap();
+        assert_eq!((dir, r.text.as_str()), (root.canonicalize().unwrap(), "UPS"));
+        let mut q = answered("q2", "choice", "Same carrier?", answer(Some("no")));
+        q.prior = Some(Prior { text: "UPS".into(), source_task: None, last_confirmed: None });
+        let log = "- 2026-10-31T00:00:00Z define: asked q2 about l1, last confirmed 2026-01-01\n";
+        assert_eq!(asked_rule(&chain, log, &q).unwrap().1.text, "UPS");
+    }
+
+    #[test]
+    fn failed_checks_leave_out_assertions_that_no_longer_exist() {
+        let mut rec = crate::link::test_reminder("t");
+        rec.log = format!("- 2026-10-31T00:00:00Z evaluate: {REPLANNED} (a1, a2)\n");
+        rec.assertions = vec![Assertion { id: "a1".into(), text: "x".into() }];
+        let item = |id: &str| VerdictItem { id: id.into(), pass: false, evidence: format!("{id} failed") };
+        rec.verdict = Some(Verdict { result: "fail".into(), at: String::new(), items: vec![item("a1"), item("a2"), item("c1")] });
+        assert_eq!(failed_checks(&rec).as_deref(), Some("- a1: a1 failed\n- c1: c1 failed"));
+        rec.assertions.clear();
+        rec.verdict.as_mut().unwrap().items.truncate(2);
+        assert_eq!(failed_checks(&rec), None);
     }
 }

@@ -16,7 +16,8 @@ pub use caps::Harness;
 pub use claude::{ClaudeEngine, resolve_bin};
 pub use engine::{
     DefineInput, DefineOut, Denial, DraftAssertion, DraftCheck, End, Engine, EvaluateInput, EvaluateOut, ExecStatus, ExecuteInput,
-    ExecuteOut, JudgedItem, Judgement, PlanInput, PlanOut, Run, ScriptedEngine, ScriptedExec, Seen, ToolUse, Usage, Watch,
+    ExecuteOut, JudgedItem, Judgement, PlanInput, PlanOut, ProposeInput, ProposeOut, Run, ScriptedEngine, ScriptedExec, Seen, ToolUse,
+    Usage, Watch,
 };
 pub use lifecycle::{Ctl, advance_with, approval_allows_execute, registry_path, task_path_key};
 pub use run::run_once;

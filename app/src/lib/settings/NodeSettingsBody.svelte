@@ -119,7 +119,7 @@
     <p class="hint">Fields save on Enter or when you leave them.</p>
   </section>
 
-  {#if src && !src.host}<NodeClaude root={src.root} path={p.path} />{/if}
+  {#if src && !src.host}<NodeClaude root={src.root} path={p.path} onadded={() => store.reloadSoon()} />{/if}
 
   <section class="nodeset__section">
     <h3 class="section-title">Actions</h3>

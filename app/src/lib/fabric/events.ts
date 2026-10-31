@@ -1,4 +1,4 @@
-export type EventKind = 'waiting' | 'done' | 'failed' | 'stuck';
+export type EventKind = 'waiting' | 'done' | 'failed' | 'stuck' | 'learned';
 
 export interface FabricEvent {
   at: string;
@@ -8,7 +8,7 @@ export interface FabricEvent {
   source?: string | null;
 }
 
-const KINDS: readonly string[] = ['waiting', 'done', 'failed', 'stuck'];
+const KINDS: readonly string[] = ['waiting', 'done', 'failed', 'stuck', 'learned'];
 const LINE = /^(\d{4}-\d\d-\d\dT[\d:.]+Z)\s+(\S+)\s+(\S+)(?:\s+(.*))?$/;
 
 export function parseEventLine(line: string): FabricEvent | null {

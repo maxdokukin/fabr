@@ -41,7 +41,7 @@ Buttons, one row: `Once` `Always` `No, something else`.
 | Always | `answer.value: always` |
 | No, something else | `answer.value: "no"`, then the follow-up below fills `answer.replacement` |
 
-`No` prompts for `replacement`.
+`No` prompts for `replacement`. A text reply to the choice message counts as `no` with the text as `replacement`, unless the text is exactly once, always or no.
 
 ## 3. Grant request
 

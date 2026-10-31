@@ -5,7 +5,8 @@ use fabr_agent::lifecycle::advance;
 use fabr_agent::link::open_reminder;
 use fabr_agent::{
     DefineInput, DefineOut, DraftAssertion, DraftCheck, End, Engine, EvaluateInput, EvaluateOut, ExecuteInput, ExecuteOut, JudgedItem,
-    Judgement, PlanInput, PlanOut, Run, ScriptedEngine, ScriptedExec, Seen, ToolUse, Usage, Watch, approval_allows_execute, run_once,
+    Judgement, PlanInput, PlanOut, ProposeInput, ProposeOut, Run, ScriptedEngine, ScriptedExec, Seen, ToolUse, Usage, Watch,
+    approval_allows_execute, run_once,
 };
 use fabr_core::fabric::{self, FabricWriteReq};
 use fabr_core::taskrec::{self, State, Step, TaskRecord};
@@ -380,7 +381,7 @@ fn execute_logs_tool_use_and_the_validator_sets_the_verdict() {
     }
     assert_eq!(std::fs::read_to_string(root.join("greet.md")).unwrap(), "hi");
     let Some(Seen::Execute { allowed, read_only, resume, .. }) = engine.seen().pop() else { panic!() };
-    assert_eq!((allowed, read_only, resume), (vec!["Read".into(), "Glob".into(), "Grep".into(), "Write".into()], false, None));
+    assert_eq!((allowed, read_only, resume), (vec!["Read".into(), "Glob".into(), "Grep".into()], false, None));
     assert!(executed.sessions.execute.is_some());
     advance(&root, &path, &fabric, 10, &engine).unwrap();
     let judged = load(&path);
@@ -400,6 +401,8 @@ fn failed_check_does_not_succeed() {
         .define(defined())
         .plan(plan(PLAN, &["Write"], ("test", &["-f", "greet.md"])))
         .exec(ScriptedExec::done("did nothing"));
+    let settings = fabric.join("settings.toml");
+    std::fs::write(&settings, format!("replan_on_fail = false\n{}", std::fs::read_to_string(&settings).unwrap())).unwrap();
     save_one(&ws, "fail check");
     run_once(&ws, "local", "", &fabric, &engine).unwrap();
     let path = record_path(&root);
@@ -407,6 +410,7 @@ fn failed_check_does_not_succeed() {
     run_once(&ws, "local", "", &fabric, &engine).unwrap();
     let rec = load(&path);
     assert_eq!((rec.state, rec.verdict.as_ref().unwrap().result.as_str()), (State::Failed, "fail"));
+    assert!(!rec.log.contains("replanning") && engine.count("plan") == 1, "{}", rec.log);
     let node = ws.get_node(NodeRef { source: "local".into(), path: String::new() }).unwrap();
     assert_eq!(node.items[0].phase, Phase::Failed);
 }
@@ -671,6 +675,40 @@ fn the_task_spend_cap_stops_the_task_before_the_next_run() {
 }
 
 #[test]
+fn a_task_at_its_spend_cap_succeeds_without_proposing() {
+    let (_tmp, fabric, ws) = setup();
+    let root = root_of(&ws);
+    let settings = fabric.join("settings.toml");
+    std::fs::write(&settings, format!("max_task_usd = 1.2\n{}", std::fs::read_to_string(&settings).unwrap())).unwrap();
+    let engine = greet().with_cost(0.3);
+    save_one(&ws, "capped proposal");
+    run_once(&ws, "local", "", &fabric, &engine).unwrap();
+    let path = record_path(&root);
+    approve(&path);
+    run_once(&ws, "local", "", &fabric, &engine).unwrap();
+    let rec = load(&path);
+    assert_eq!((rec.state, rec.step), (State::Succeeded, None), "{}", rec.log);
+    assert!(rec.log.contains("learn: no proposal (task spend cap reached)") && engine.count("propose") == 0, "{}", rec.log);
+}
+
+#[test]
+fn a_failed_check_over_the_task_spend_cap_fails_without_a_replan() {
+    let (_tmp, fabric, ws) = setup();
+    let root = root_of(&ws);
+    let settings = fabric.join("settings.toml");
+    std::fs::write(&settings, format!("max_task_usd = 1.0\n{}", std::fs::read_to_string(&settings).unwrap())).unwrap();
+    let engine = ScriptedEngine::new().define(defined()).plan(greet_plan()).exec(ScriptedExec::done("did nothing")).with_cost(0.3);
+    save_one(&ws, "capped replan");
+    run_once(&ws, "local", "", &fabric, &engine).unwrap();
+    let path = record_path(&root);
+    approve(&path);
+    run_once(&ws, "local", "", &fabric, &engine).unwrap();
+    let rec = load(&path);
+    assert_eq!((rec.state, rec.verdict.as_ref().unwrap().result.as_str()), (State::Failed, "fail"), "{}", rec.log);
+    assert!(!rec.log.contains("replanning") && engine.count("plan") == 1, "{}", rec.log);
+}
+
+#[test]
 fn a_live_chat_on_the_session_holds_the_run_and_a_stale_marker_is_removed() {
     let (_tmp, fabric, ws) = setup();
     let root = root_of(&ws);
@@ -746,6 +784,10 @@ impl Engine for CancelsMidRun {
     }
 
     fn evaluate(&self, _: &EvaluateInput, _: &mut dyn Watch) -> Run<EvaluateOut> {
+        unreachable!()
+    }
+
+    fn propose(&self, _: &ProposeInput, _: &mut dyn Watch) -> Run<ProposeOut> {
         unreachable!()
     }
 }
@@ -1104,7 +1146,7 @@ fn human_sections_are_not_regenerated_and_redo_steps_back() {
 }
 
 #[test]
-fn one_failing_assertion_fails_the_task_and_unchecked_is_marked() {
+fn a_failed_check_replans_once_and_a_second_failure_fails_the_task() {
     let (_tmp, fabric, ws) = setup();
     let root = root_of(&ws);
     let mut d = defined();
@@ -1114,14 +1156,47 @@ fn one_failing_assertion_fails_the_task_and_unchecked_is_marked() {
     let verdict = EvaluateOut {
         items: vec![j("a1", Judgement::Pass, "ok"), j("a2", Judgement::Fail, "also wrote x.txt"), j("a3", Judgement::Unchecked, "?")],
     };
-    let engine = ScriptedEngine::new().define(d).plan(greet_plan()).exec(writes_greet()).verdict(verdict);
+    let revised = plan(&format!("{PLAN}\n2. Write nothing else"), &["Write"], ("test", &["-f", "greet.md"]));
+    let engine = ScriptedEngine::new()
+        .define(d)
+        .plan(greet_plan())
+        .plan(revised)
+        .exec(writes_greet())
+        .exec(writes_greet())
+        .verdict(verdict.clone())
+        .verdict(verdict);
     save_one(&ws, "verdict");
     run_once(&ws, "local", "", &fabric, &engine).unwrap();
-    approve(&record_path(&root));
+    let path = record_path(&root);
+    approve(&path);
+    for _ in 0..3 {
+        advance(&root, &path, &fabric, 10, &engine).unwrap();
+    }
+    let rec = load(&path);
+    assert_eq!((rec.state, rec.step, rec.waiting, rec.approval.is_none()), (State::Task, Some(Step::Plan), false, true), "{}", rec.log);
+    assert_eq!(registry_step(&fabric), Some(("task".into(), "plan".into())));
+    advance(&root, &path, &fabric, 10, &engine).unwrap();
+    let rec = load(&path);
+    assert_eq!((rec.state, rec.step, rec.waiting), (State::Defined, Some(Step::Approve), true), "{}", rec.log);
+    assert_eq!(rec.approval.as_ref().unwrap().status, "pending");
+    assert_eq!(rec.verdict.as_ref().unwrap().result, "fail");
+    assert!(rec.log.contains("evaluate: replanning after failed check (a2, a3)") && rec.log.contains("plan: redrafted after failed check"));
+    let Some(Seen::Plan { resume, failed: Some(note), .. }) = engine.seen().into_iter().rfind(|s| matches!(s, Seen::Plan { .. })) else {
+        panic!()
+    };
+    assert_eq!(resume, rec.sessions.plan);
+    assert_eq!(note, "- a2: also wrote x.txt\n- a3: unchecked: ?");
+    let first_exec = rec.sessions.execute.clone();
+    approve(&path);
     run_once(&ws, "local", "", &fabric, &engine).unwrap();
-    let rec = load(&record_path(&root));
+    let rec = load(&path);
+    let execs: Vec<Seen> = engine.seen().into_iter().filter(|s| matches!(s, Seen::Execute { .. })).collect();
+    let Seen::Execute { resume, failed: Some(note), .. } = &execs[1] else { panic!("{execs:?}") };
+    assert!(*resume == first_exec && note.contains("a2: also wrote x.txt"), "{execs:?}");
+    assert_eq!((engine.count("plan"), engine.count("execute"), engine.count("evaluate")), (2, 2, 2));
     let v = rec.verdict.as_ref().unwrap();
     assert_eq!((rec.state, v.result.as_str()), (State::Failed, "fail"));
+    assert_eq!(rec.log.matches("replanning after failed check").count(), 1);
     assert_eq!((v.items[0].pass, v.items[1].pass, v.items[1].evidence.as_str()), (true, false, "also wrote x.txt"));
     assert_eq!((v.items[2].pass, v.items[2].evidence.as_str()), (false, "unchecked: ?"));
 }
@@ -1328,4 +1403,93 @@ fn scripted_engine_reports_cost_and_sessions_without_a_watch() {
     let tmp = tempfile::tempdir().unwrap();
     let run = Engine::define(&engine, &DefineInput { cwd: tmp.path(), resume: None, title: "t", context: "", answers: "" }, &mut NoWatch);
     assert!(matches!(run.end, End::Done(_)) && run.cost_usd == 0.02 && run.session_id.is_some());
+}
+
+fn failed_a1() -> EvaluateOut {
+    EvaluateOut { items: vec![JudgedItem { id: "a1".into(), verdict: Judgement::Fail, evidence: "greet.md is empty".into() }] }
+}
+
+fn replan_with_a_human_plan(second: PlanOut) -> (tempfile::TempDir, ScriptedEngine, TaskRecord) {
+    let (tmp, fabric, ws) = setup();
+    let root = root_of(&ws);
+    let engine = ScriptedEngine::new()
+        .define(defined())
+        .plan(greet_plan())
+        .plan(second)
+        .exec(ScriptedExec::done("wrote").write("greet.md", ""))
+        .verdict(failed_a1());
+    save_one(&ws, "greet");
+    run_once(&ws, "local", "", &fabric, &engine).unwrap();
+    let path = record_path(&root);
+    edit(&path, |r| {
+        r.plan = format!("{PLAN}\n2. Mine");
+        r.by.plan = Some(taskrec::Author::Human);
+        common::sign(r);
+    });
+    for _ in 0..4 {
+        advance(&root, &path, &fabric, 10, &engine).unwrap();
+    }
+    (tmp, engine, load(&path))
+}
+
+#[test]
+fn a_failed_check_on_a_human_plan_still_asks_the_planner_and_says_when_nothing_changed() {
+    let (_tmp, engine, rec) = replan_with_a_human_plan(plan("", &["Write"], ("test", &["-f", "greet.md"])));
+    assert_eq!((rec.state, rec.step, rec.approval.as_ref().unwrap().status.as_str()), (State::Defined, Some(Step::Approve), "pending"));
+    assert!(rec.log.contains("plan: unchanged after failed check") && !rec.log.contains("redrafted"), "{}", rec.log);
+    assert_eq!((rec.plan.as_str(), rec.by.plan), (format!("{PLAN}\n2. Mine").as_str(), Some(taskrec::Author::Human)));
+    let Some(Seen::Plan { failed, human_plan, .. }) = engine.seen().into_iter().rfind(|s| matches!(s, Seen::Plan { .. })) else { panic!() };
+    assert_eq!((failed.as_deref(), human_plan.as_deref()), (Some("- a1: greet.md is empty"), Some(rec.plan.as_str())));
+    assert_eq!(engine.count("plan"), 2);
+
+    let revised = plan(&format!("{PLAN}\n2. Put hi in it"), &["Write"], ("test", &["-s", "greet.md"]));
+    let (_tmp, _, rec) = replan_with_a_human_plan(revised);
+    assert!(rec.log.contains("plan: redrafted after failed check"), "{}", rec.log);
+    assert!(rec.plan.ends_with("2. Put hi in it") && rec.by.plan == Some(taskrec::Author::Agent), "{}", rec.plan);
+}
+
+#[test]
+fn the_revised_plan_reaches_the_executor_until_a_run_on_it_produces_a_turn() {
+    let (_tmp, fabric, ws) = setup();
+    let root = root_of(&ws);
+    let engine = ScriptedEngine::new()
+        .define(defined())
+        .plan(greet_plan())
+        .plan(plan(&format!("{PLAN}\n2. Put hi in it"), &["Write"], ("test", &["-f", "greet.md"])))
+        .exec(ScriptedExec::done("wrote").write("greet.md", ""))
+        .verdict(failed_a1());
+    save_one(&ws, "greet");
+    run_once(&ws, "local", "", &fabric, &engine).unwrap();
+    let path = record_path(&root);
+    approve(&path);
+    for _ in 0..4 {
+        advance(&root, &path, &fabric, 10, &engine).unwrap();
+    }
+    assert_eq!((load(&path).state, load(&path).step), (State::Defined, Some(Step::Approve)), "{}", load(&path).log);
+    approve(&path);
+    advance(&root, &path, &fabric, 10, &engine).unwrap();
+    engine.push_exec(Err("Claude Code exited before answering".into()));
+    assert!(advance(&root, &path, &fabric, 10, &engine).is_err());
+    engine.push_exec(Ok(ScriptedExec::ask("Which greeting?").tool("Read", json!({"file_path": "greet.md"}))));
+    advance(&root, &path, &fabric, 10, &engine).unwrap();
+    answer(&path, "hi");
+    engine.push_exec(Ok(ScriptedExec::done("wrote hi").write("greet.md", "hi")));
+    advance(&root, &path, &fabric, 10, &engine).unwrap();
+    let failed: Vec<Option<String>> =
+        engine.seen().into_iter().filter_map(|s| if let Seen::Execute { failed, .. } = s { Some(failed) } else { None }).collect();
+    let note = Some("- a1: greet.md is empty".to_string());
+    assert_eq!(failed, [None, note.clone(), note, None], "{}", load(&path).log);
+}
+
+#[test]
+fn a_fresh_empty_chat_marker_counts_as_running_and_an_old_one_is_removed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let id = "12345678-1234-4234-8234-123456789abc";
+    let lock = fabr_core::ccsession::chat_marker(tmp.path(), id);
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    std::fs::write(&lock, "").unwrap();
+    assert!(fabr_agent::lifecycle::chat_running(tmp.path(), id) && lock.exists());
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+    std::fs::File::options().write(true).open(&lock).unwrap().set_modified(old).unwrap();
+    assert!(!fabr_agent::lifecycle::chat_running(tmp.path(), id) && !lock.exists());
 }

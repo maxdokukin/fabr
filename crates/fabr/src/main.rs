@@ -105,6 +105,8 @@ enum Cmd {
         #[arg(required = true)]
         text: Vec<String>,
     },
+    #[command(about = "Add a Claude Code session of a folder as a reminder and print the record path")]
+    Track { folder: PathBuf, session_id: String },
     #[command(about = "Approve the pending plan")]
     Approve { record: String },
     #[command(about = "Refuse the pending plan")]
@@ -443,6 +445,9 @@ fn main() -> ExitCode {
         Cmd::Import { path } => cmd_import(path),
         Cmd::Ls { all, overdue, wip, path } => cmd_ls(path, all, overdue, wip),
         Cmd::Status { json, path } => cmd_status(path, json),
+        Cmd::Track { folder, session_id } => {
+            fabr_core::ccsession::track(&fabr_core::ccsession::config_dir(), &folder, &session_id).map(|p| println!("{p}"))
+        }
         c @ (Cmd::Show { .. }
         | Cmd::Delegate { .. }
         | Cmd::Answer { .. }

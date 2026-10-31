@@ -11,6 +11,7 @@ use std::time::Duration;
 const LINK: &str = "Open fabr for details.";
 const LATE: &str = "Already answered in the GUI.";
 const LIMIT: usize = 4096;
+const REPLANNED: &str = "evaluate: replanning after failed check";
 const MSG_CAP: usize = 200;
 const TOK_CAP: usize = 400;
 const LIST_CAP: usize = 50;
@@ -115,7 +116,10 @@ fn applicable(rec: &TaskRecord, action: &str, key: &str) -> bool {
         "approve" | "refuse" => {
             rec.approval.as_ref().is_some_and(|a| a.status == "pending" && a.digest.clone().unwrap_or_else(|| approval_digest(rec)) == key)
         }
-        _ => rec.question.as_ref().is_some_and(|q| q.id == key && q.answer.is_none() && (action != "answer" || q.kind == "open")),
+        _ => rec
+            .question
+            .as_ref()
+            .is_some_and(|q| q.id == key && q.answer.is_none() && (action != "answer" || matches!(q.kind.as_str(), "open" | "choice"))),
     }
 }
 
@@ -142,6 +146,13 @@ fn patch(rec: &TaskRecord, action: &str, text: Option<&str>, now: &str) -> GuiPa
             let fields = rec.question.as_ref().and_then(|q| q.fields.clone()).unwrap_or_default();
             let granted = fields.into_iter().map(|field| Grant { field, scope: "task".into() }).collect();
             p.answer = answer(None, None, Some(granted));
+        }
+        _ if rec.question.as_ref().is_some_and(|q| q.kind == "choice") => {
+            let word = text.map(|t| t.trim().to_ascii_lowercase()).filter(|t| matches!(t.as_str(), "once" | "always" | "no"));
+            p.answer = match word {
+                Some(w) => answer(Some(&w), None, None),
+                None => answer(Some("no"), text, None),
+            };
         }
         _ => p.answer = answer(text, None, None),
     }
@@ -226,7 +237,7 @@ impl Bot {
                 "choice" => {
                     let last = q.prior.as_ref().map(|p| format!("Last time: {}\n", p.text)).unwrap_or_default();
                     let kb = self.keyboard(&path, &q.id, &[("Once", "once"), ("Always", "always"), ("No, something else", "no")]);
-                    (format!("{}\n{}\n{last}{LINK}", rec.title, q.text), Some(kb))
+                    (format!("{}\n{}\n{last}Or reply to this message with what to do instead.\n{LINK}", rec.title, q.text), Some(kb))
                 }
                 "grant" => {
                     let fields = list(q.fields.as_deref().unwrap_or_default(), ", ");
@@ -245,11 +256,19 @@ impl Bot {
             && a.status == "pending"
         {
             let digest = a.digest.clone().unwrap_or_else(|| approval_digest(rec));
-            if !seen(&self.st, |s| &s.approvals, &digest) {
+            let replanned = rec.log.contains(REPLANNED);
+            let key = if replanned { format!("{digest}|replan") } else { digest.clone() };
+            if !seen(&self.st, |s| &s.approvals, &key) {
                 let kb = self.keyboard(&path, &digest, &[("Approve", "approve"), ("Refuse", "refuse"), ("Open in GUI", "open")]);
-                let id = self.send(&approval_message(rec), Some(kb))?;
+                let mut text = approval_message(rec);
+                if replanned {
+                    let (title, rest) = text.split_once('\n').unwrap_or((text.as_str(), ""));
+                    text =
+                        format!("{title}\nThe first attempt failed a check. Here is a revised plan.\n{rest}").chars().take(LIMIT).collect();
+                }
+                let id = self.send(&text, Some(kb))?;
                 self.remember(id, &path, "");
-                push_capped(&mut self.st.sent.entry(path).or_default().approvals, digest);
+                push_capped(&mut self.st.sent.entry(path).or_default().approvals, key);
                 self.save()?;
             }
         }
@@ -261,6 +280,7 @@ impl Bot {
             "done" => "Done",
             "failed" => "Failed",
             "stuck" => "Stuck",
+            "learned" => "Learned",
             _ => return,
         };
         let path = record_path.to_string_lossy().into_owned();
@@ -558,6 +578,21 @@ mod tests {
     }
 
     #[test]
+    fn a_replanned_task_gets_the_approval_again_with_a_notice() {
+        let f = fake();
+        let (_d, c) = ctx(&f);
+        let (_t, p, mut rec) = setup(&record("null", "{status: pending, digest: abc}", "defined"));
+        let mut bot = Bot::from_ctx(&c).unwrap();
+        bot.sync_record(&p, &rec).unwrap();
+        rec.log.push_str("- 2026-10-31T01:00:00Z evaluate: replanning after failed check (a1)\n");
+        bot.sync_record(&p, &rec).unwrap();
+        bot.sync_record(&p, &rec).unwrap();
+        assert_eq!(f.sent().len(), 2);
+        let t = f.sent()[1]["text"].as_str().unwrap().to_string();
+        assert!(t.contains("\nThe first attempt failed a check. Here is a revised plan.\n") && t.contains("Plan:"), "{t}");
+    }
+
+    #[test]
     fn long_plan_is_dropped_from_the_approval() {
         let f = fake();
         let (_d, c) = ctx(&f);
@@ -645,6 +680,26 @@ mod tests {
         let g = reload(&p2).question.unwrap().answer.unwrap().granted.unwrap();
         assert_eq!(g.len(), 2);
         assert!(g.iter().all(|x| x.scope == "task"));
+    }
+
+    #[test]
+    fn a_text_reply_to_a_choice_is_a_no_with_the_text_unless_it_is_a_choice_word() {
+        let f = fake();
+        let (_d, c) = ctx(&f);
+        let choice = "{id: q2, kind: choice, text: Ship home?, options: [once, always, 'no'], prior: {text: Home}, answer: null}";
+        let mut bot = Bot::from_ctx(&c).unwrap();
+        let (_t, p, rec) = setup(&record(choice, "null", "task"));
+        bot.sync_record(&p, &rec).unwrap();
+        f.push(say(1, UID, "ship to the office", Some(101)));
+        assert_eq!(bot.poll().unwrap(), 1);
+        let a = reload(&p).question.unwrap().answer.unwrap();
+        assert_eq!((a.value.as_deref(), a.replacement.as_deref()), (Some("no"), Some("ship to the office")));
+        let (_t2, p2, rec2) = setup(&record(&choice.replace("q2", "q3"), "null", "task"));
+        bot.sync_record(&p2, &rec2).unwrap();
+        f.push(say(2, UID, " Always ", Some(102)));
+        assert_eq!(bot.poll().unwrap(), 1);
+        let a = reload(&p2).question.unwrap().answer.unwrap();
+        assert_eq!((a.value.as_deref(), a.replacement), (Some("always"), None));
     }
 
     #[test]

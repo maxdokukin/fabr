@@ -13,6 +13,7 @@ pub mod meta;
 pub mod node;
 pub mod ops;
 pub mod paths;
+pub mod proposals;
 pub mod redact;
 pub mod remote;
 pub mod sample;

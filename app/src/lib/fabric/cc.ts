@@ -14,6 +14,11 @@ export function ago(iso: string, now: Date = new Date()): string {
 
 export const newestFirst = (list: CcSession[]): CcSession[] => [...list].sort((a, b) => b.modified_at.localeCompare(a.modified_at));
 
+const ROLE_LINE = { plan: 'Planner', execute: 'Executor', evaluate: 'Validator' } as const;
+
+export const taskLine = (t: NonNullable<CcSession['task']>): string =>
+  t.role === 'source' ? `Tracked as ${t.title}` : `${ROLE_LINE[t.role]} of ${t.title}`;
+
 export const sessionTitle = (s: { title: string }): string => s.title.trim() || 'Untitled';
 
 export const toolLine = (e: TranscriptEntry): string => `${e.tool === 'error' ? 'Failed' : e.tool || 'Tool'}  ${e.text}`.trim();
@@ -37,5 +42,13 @@ export async function openNewClaude(folder: string): Promise<OpenOutcome> {
       }
     }
     return { opened: false, copied: false, message: errText(e) };
+  }
+}
+
+export async function listOrNote<T>(load: Promise<T[]>, what: string): Promise<{ list: T[]; note: string | null }> {
+  try {
+    return { list: await load, note: null };
+  } catch (e) {
+    return { list: [], note: `${what} could not be read: ${errText(e)}` };
   }
 }
