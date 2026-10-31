@@ -27,7 +27,7 @@ export function createMockApi(opts: MockOpts = {}): Api {
   let fabSettings: FabricSettings = {
     default_folder: '~/', model: '', telegram_user_id: null, auto_mode: false,
     question_budget: 5, heartbeat_interval_s: 10, execute: 'full', capabilities: { tools: ['read_file', 'write_file', 'run_command'], checks: ['git', 'cargo'] }, setup: { completed_steps: [], completed: false },
-    claude_bin: '', effort: '',
+    claude_bin: '', effort: '', max_budget_usd: 0, execute_timeout_s: 1800,
   };
   let fabSettingsExist = false;
   let know: NodeKnowledge = {
@@ -268,7 +268,7 @@ export function createMockApi(opts: MockOpts = {}): Api {
     async fabricAgentStart() { return { running: true, reason: null }; },
     async fabricCheck(req) {
       await wait();
-      if (req.kind === 'claude') return { ok: true, version: '2.1.287 (Claude Code)', path: req.path || '/usr/local/bin/claude' };
+      if (req.kind === 'claude') return { ok: true, version: '2.1.287 (Claude Code)', path: req.path || '/usr/local/bin/claude', logged_in: true, auth: 'claude.ai, max' };
       if (req.kind === 'telegram_token') return { ok: true, bot_name: 'fabr_mock_bot' };
       return { ok: true };
     },

@@ -107,6 +107,16 @@ pub struct FabricSettings {
     pub claude_bin: String,
     #[serde(default)]
     pub effort: String,
+    #[serde(default)]
+    pub max_budget_usd: f64,
+    #[serde(default = "default_execute_timeout_s")]
+    pub execute_timeout_s: u32,
+}
+
+pub const EXECUTE_TIMEOUT_RANGE: std::ops::RangeInclusive<u32> = 60..=14400;
+
+fn default_execute_timeout_s() -> u32 {
+    1800
 }
 
 impl FabricSettings {
@@ -123,6 +133,8 @@ impl FabricSettings {
             capabilities: Capabilities::default(),
             claude_bin: String::new(),
             effort: String::new(),
+            max_budget_usd: 0.0,
+            execute_timeout_s: default_execute_timeout_s(),
         }
     }
 }
@@ -203,6 +215,9 @@ pub fn settings_read(ctx: &Ctx) -> Result<SettingsRead, FabrError> {
     if let Some(v) = doc.get("effort").and_then(Item::as_str) {
         s.effort = v.into();
     }
+    if let Some(n) = doc.get("max_budget_usd").and_then(|i| i.as_float().or_else(|| i.as_integer().map(|n| n as f64))) {
+        s.max_budget_usd = if n.is_finite() && n > 0.0 { n } else { 0.0 };
+    }
     s.telegram_user_id = doc.get("telegram_user_id").and_then(Item::as_integer);
     if let Some(v) = doc.get("auto_mode").and_then(Item::as_bool) {
         s.auto_mode = v;
@@ -210,6 +225,7 @@ pub fn settings_read(ctx: &Ctx) -> Result<SettingsRead, FabrError> {
     let int = |k: &str, d: u32| doc.get(k).and_then(Item::as_integer).map_or(d, |n| n.clamp(0, u32::MAX as i64) as u32);
     s.question_budget = int("question_budget", s.question_budget);
     s.heartbeat_interval_s = int("heartbeat_interval_s", s.heartbeat_interval_s);
+    s.execute_timeout_s = int("execute_timeout_s", s.execute_timeout_s).clamp(*EXECUTE_TIMEOUT_RANGE.start(), *EXECUTE_TIMEOUT_RANGE.end());
     if let Some(t) = doc.get("setup").and_then(Item::as_table_like) {
         if let Some(a) = t.get("completed_steps").and_then(Item::as_array) {
             s.setup.completed_steps = a.iter().filter_map(|v| v.as_str().map(String::from)).collect();
@@ -242,12 +258,24 @@ pub fn settings_write(ctx: &Ctx, req: SettingsWriteReq) -> Result<SettingsRead, 
     if !EFFORTS.contains(&s.effort.as_str()) {
         return Err(FabrError::BadRequest(format!("effort must be empty or one of {}", EFFORTS[1..].join(", "))));
     }
+    if !s.max_budget_usd.is_finite() || s.max_budget_usd < 0.0 {
+        return Err(FabrError::BadRequest("max_budget_usd must be 0 (no cap) or a positive amount".into()));
+    }
+    if !EXECUTE_TIMEOUT_RANGE.contains(&s.execute_timeout_s) {
+        return Err(FabrError::BadRequest(format!(
+            "execute_timeout_s must be between {} and {}",
+            EXECUTE_TIMEOUT_RANGE.start(),
+            EXECUTE_TIMEOUT_RANGE.end()
+        )));
+    }
     let path = ctx.settings_path();
     let mut doc = load_doc(&path)?.unwrap_or_default();
     doc["default_folder"] = value(expand_home(&s.default_folder, &ctx.home).to_string_lossy().into_owned());
     doc["model"] = value(s.model);
     doc["claude_bin"] = value(s.claude_bin);
     doc["effort"] = value(s.effort);
+    doc["max_budget_usd"] = value(s.max_budget_usd);
+    doc["execute_timeout_s"] = value(s.execute_timeout_s as i64);
     match s.telegram_user_id {
         Some(id) => doc["telegram_user_id"] = value(id),
         None => {
@@ -349,6 +377,7 @@ pub fn check_folder(ctx: &Ctx, path: &str) -> Value {
 }
 
 const CLAUDE_MISSING: &str = "Claude Code is not installed. Install it from https://claude.com/claude-code, then press Check again.";
+const NOT_SIGNED_IN: &str = "Claude Code is installed but not signed in. Run claude in a terminal and sign in, then press Check again.";
 const CLAUDE_TIMEOUT_S: u64 = 10;
 
 fn is_executable(p: &Path) -> bool {
@@ -402,16 +431,45 @@ fn check_claude_timeout(ctx: &Ctx, bin: &str, limit: Duration) -> Value {
     if !is_executable(&path) {
         return fail(&format!("{} is not an executable file.", path.display()));
     }
-    let mut child = match std::process::Command::new(&path)
-        .arg("--version")
+    let (ok, out) = match run_capture(&path, "--version", limit) {
+        Ok(r) => r,
+        Err(RunErr::Spawn(e)) => return fail(&format!("Could not run {}: {}.", path.display(), e)),
+        Err(RunErr::Timeout) => {
+            return fail(&format!("{} --version did not answer in {} seconds. Press Check again.", path.display(), limit.as_secs()));
+        }
+    };
+    let version = out.lines().next().unwrap_or("").trim().to_string();
+    if !ok || version.is_empty() {
+        return fail(&format!("{} --version failed. Is this the Claude Code program?", path.display()));
+    }
+    let mut r = json!({ "ok": true, "version": version, "path": path.to_string_lossy() });
+    if let Ok((_, text)) = run_capture(&path, "auth status", limit)
+        && let Some((logged_in, auth)) = parse_auth(&text)
+    {
+        if !logged_in {
+            return fail(NOT_SIGNED_IN);
+        }
+        r["logged_in"] = json!(true);
+        if let Some(a) = auth {
+            r["auth"] = json!(a);
+        }
+    }
+    r
+}
+
+enum RunErr {
+    Spawn(String),
+    Timeout,
+}
+
+fn run_capture(path: &Path, args: &str, limit: Duration) -> Result<(bool, String), RunErr> {
+    let mut child = std::process::Command::new(path)
+        .args(args.split(' '))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => return fail(&format!("Could not run {}: {}.", path.display(), e.kind())),
-    };
+        .map_err(|e| RunErr::Spawn(e.kind().to_string()))?;
     let deadline = Instant::now() + limit;
     let status = loop {
         match child.try_wait() {
@@ -420,20 +478,34 @@ fn check_claude_timeout(ctx: &Ctx, bin: &str, limit: Duration) -> Value {
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return fail(&format!("{} --version did not answer in {} seconds. Press Check again.", path.display(), limit.as_secs()));
+                return Err(RunErr::Timeout);
             }
-            Err(e) => return fail(&format!("Could not run {}: {}.", path.display(), e.kind())),
+            Err(e) => return Err(RunErr::Spawn(e.kind().to_string())),
         }
     };
     let mut out = String::new();
     if let Some(mut so) = child.stdout.take() {
         let _ = std::io::Read::read_to_string(&mut so, &mut out);
     }
-    let version = out.lines().next().unwrap_or("").trim().to_string();
-    if !status.success() || version.is_empty() {
-        return fail(&format!("{} --version failed. Is this the Claude Code program?", path.display()));
+    Ok((status.success(), out))
+}
+
+fn parse_auth(text: &str) -> Option<(bool, Option<String>)> {
+    let v: Value = serde_json::from_str(text.trim()).ok()?;
+    let logged_in = v.get("loggedIn")?.as_bool()?;
+    if !logged_in {
+        return Some((false, None));
     }
-    json!({ "ok": true, "version": version, "path": path.to_string_lossy() })
+    let method = v["authMethod"].as_str().unwrap_or("");
+    let plan = v["subscriptionType"].as_str().unwrap_or("");
+    let label = match (method, plan) {
+        ("", "") => String::new(),
+        ("", p) => p.to_string(),
+        (m, "") if m.contains("api") || m.contains("key") => "API key".to_string(),
+        (m, "") => m.to_string(),
+        (m, p) => format!("{m}, {p}"),
+    };
+    Some((true, Some(label).filter(|l| !l.is_empty())))
 }
 
 fn tg(ctx: &Ctx, token: &str, method: &str) -> String {
@@ -610,11 +682,14 @@ mod tests {
         s.model = "claude-haiku-5-5".into();
         s.claude_bin = "/opt/claude".into();
         s.effort = "high".into();
+        s.max_budget_usd = 2.5;
+        s.execute_timeout_s = 600;
         let w = settings_write(&c, SettingsWriteReq { settings: s.clone() }).unwrap();
         assert!(w.exists);
         assert_eq!(w.settings, s);
         let text = std::fs::read_to_string(c.settings_path()).unwrap();
         assert!(text.contains("future_key = \"x\"") && text.contains("extra = 1"));
+        assert!(text.contains("max_budget_usd = 2.5") && text.contains("execute_timeout_s = 600"));
         s.telegram_user_id = None;
         settings_write(&c, SettingsWriteReq { settings: s }).unwrap();
         assert_eq!(settings_read(&c).unwrap().settings.telegram_user_id, None);
@@ -731,6 +806,56 @@ mod tests {
         let r = check_claude_timeout(&c, slow.to_str().unwrap(), Duration::from_millis(200));
         assert!(t.elapsed() < Duration::from_secs(3));
         assert!(r["reason"].as_str().unwrap().contains("did not answer"));
+    }
+
+    #[test]
+    fn execute_limits_default_clamp_and_validate() {
+        let d = tempfile::tempdir().unwrap();
+        let c = Ctx::new(d.path());
+        let s = settings_read(&c).unwrap().settings;
+        assert_eq!((s.max_budget_usd, s.execute_timeout_s), (0.0, 1800));
+        std::fs::create_dir_all(c.space()).unwrap();
+        std::fs::write(c.settings_path(), "max_budget_usd = 3\nexecute_timeout_s = 5\n").unwrap();
+        let s = settings_read(&c).unwrap().settings;
+        assert_eq!((s.max_budget_usd, s.execute_timeout_s), (3.0, 60));
+        std::fs::write(c.settings_path(), "execute_timeout_s = 99999\nmax_budget_usd = -1.0\n").unwrap();
+        let mut s = settings_read(&c).unwrap().settings;
+        assert_eq!((s.max_budget_usd, s.execute_timeout_s), (0.0, 14400));
+        s.max_budget_usd = -1.0;
+        assert!(settings_write(&c, SettingsWriteReq { settings: s.clone() }).is_err());
+        s.max_budget_usd = 1.0;
+        s.execute_timeout_s = 10;
+        assert!(settings_write(&c, SettingsWriteReq { settings: s }).is_err());
+    }
+
+    #[test]
+    fn auth_parsing() {
+        let max = r#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max","email":"a@b.c"}"#;
+        assert_eq!(parse_auth(max), Some((true, Some("claude.ai, max".into()))));
+        assert_eq!(parse_auth(r#"{"loggedIn":true,"authMethod":"api_key"}"#), Some((true, Some("API key".into()))));
+        assert_eq!(parse_auth(r#"{"loggedIn":true}"#), Some((true, None)));
+        assert_eq!(parse_auth(r#"{"loggedIn":false}"#), Some((false, None)));
+        assert_eq!(parse_auth("Not logged in"), None);
+        assert_eq!(parse_auth(""), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_check_reports_sign_in() {
+        let d = tempfile::tempdir().unwrap();
+        let c = Ctx::new(d.path());
+        let body = |auth: &str| format!("if [ \"$1\" = auth ]; then echo '{auth}'; else echo '2.1.287 (Claude Code)'; fi");
+        let ok = script(d.path(), "ok", &body(r#"{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"max","email":"a@b.c"}"#));
+        let r = check_claude_at(&c, ok.to_str().unwrap());
+        assert_eq!((r["ok"].clone(), r["logged_in"].clone(), r["auth"].clone()), (json!(true), json!(true), json!("claude.ai, max")));
+        assert!(!r.to_string().contains("a@b.c"));
+        let out = script(d.path(), "out", &body(r#"{"loggedIn":false}"#));
+        let r = check_claude_at(&c, out.to_str().unwrap());
+        assert_eq!((r["ok"].clone(), r["reason"].clone()), (json!(false), json!(NOT_SIGNED_IN)));
+        let old = script(d.path(), "old", "if [ \"$1\" = auth ]; then echo 'unknown command' >&2; exit 1; fi; echo '1.0.0 (Claude Code)'");
+        let r = check_claude_at(&c, old.to_str().unwrap());
+        assert_eq!(r["ok"], true);
+        assert!(r.get("logged_in").is_none() && r.get("auth").is_none());
     }
 
     #[test]

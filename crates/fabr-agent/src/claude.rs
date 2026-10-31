@@ -37,11 +37,20 @@ pub struct ClaudeEngine {
     pub model: String,
     pub effort: String,
     pub timeout: Duration,
+    pub max_budget_usd: f64,
 }
+
+pub const SPEND_CAP: &str = "spend cap reached";
 
 impl ClaudeEngine {
     pub fn new(bin: impl Into<PathBuf>) -> ClaudeEngine {
-        ClaudeEngine { bin: bin.into(), model: String::new(), effort: String::new(), timeout: Duration::from_secs(DEFAULT_TIMEOUT_S) }
+        ClaudeEngine {
+            bin: bin.into(),
+            model: String::new(),
+            effort: String::new(),
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_S),
+            max_budget_usd: 0.0,
+        }
     }
 
     pub fn with_model(mut self, model: &str, effort: &str) -> ClaudeEngine {
@@ -52,6 +61,11 @@ impl ClaudeEngine {
 
     pub fn with_timeout(mut self, timeout: Duration) -> ClaudeEngine {
         self.timeout = timeout;
+        self
+    }
+
+    pub fn with_budget(mut self, usd: f64) -> ClaudeEngine {
+        self.max_budget_usd = if usd.is_finite() && usd > 0.0 { usd } else { 0.0 };
         self
     }
 }
@@ -131,6 +145,9 @@ pub fn args(engine: &ClaudeEngine, call: &Call, session: &str) -> Vec<String> {
     }
     if !engine.effort.is_empty() {
         out.extend(["--effort".into(), engine.effort.clone()]);
+    }
+    if engine.max_budget_usd > 0.0 {
+        out.extend(["--max-budget-usd".into(), format!("{:.2}", engine.max_budget_usd)]);
     }
     if !call.name.is_empty() {
         out.extend(["--name".into(), call.name.clone()]);
@@ -289,6 +306,9 @@ fn finish<T: DeserializeOwned>(code: Option<i32>, result: Option<Value>, err_tai
         })
         .unwrap_or_default();
     let subtype = r["subtype"].as_str().unwrap_or("unknown");
+    if subtype.contains("budget") {
+        return End::Failed(FabrError::Remote(format!("{SPEND_CAP}: Claude Code stopped after ${:.2}", run.cost_usd)));
+    }
     if r["is_error"].as_bool().unwrap_or(false) || subtype != "success" {
         let text = r["result"].as_str().unwrap_or("").trim();
         let detail = if text.is_empty() { err_tail } else { text };
@@ -340,6 +360,9 @@ pub fn strict<T: DeserializeOwned>(engine: &ClaudeEngine, call: &Call, watch: &m
     second.usage.output_tokens += first.usage.output_tokens;
     if second.session_id.is_none() {
         second.session_id = Some(id);
+    }
+    if missing_text(&second).is_some() {
+        second.end = first.end;
     }
     second
 }

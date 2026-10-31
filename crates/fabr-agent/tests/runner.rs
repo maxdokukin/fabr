@@ -423,7 +423,7 @@ fn an_error_result_or_missing_structured_output_is_a_stage_error() {
     assert!(rec.log.contains("define: error 1: Claude Code reported error_max_turns"), "{}", rec.log);
     r.tick();
     let rec = load(&path);
-    assert!(rec.log.contains("define: error 2: Claude Code returned no structured output: still prose"), "{}", rec.log);
+    assert!(rec.log.contains("define: error 2: Claude Code returned no structured output: hi"), "{}", rec.log);
     assert!(e.fake.stdin(3).contains("calling the StructuredOutput tool"), "{}", e.fake.stdin(3));
     assert_eq!(e.fake.flag(3, "--resume"), rec.sessions.plan.clone());
     assert!((rec.cost_usd - 0.85).abs() < 1e-9, "{}", rec.cost_usd);
@@ -870,5 +870,32 @@ fn the_whole_pipeline_runs_through_claude_code_sessions() {
     assert!(rec.log.contains("learn: captured 1 answer"), "{}", rec.log);
     let learned = fabr_core::knowledge::read_learned(&e.proj).unwrap();
     assert_eq!(learned.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["greet.md"]);
+    r.shutdown(true);
+}
+
+#[test]
+fn a_run_that_hits_the_spend_cap_fails_the_task_without_retries() {
+    let e = ready();
+    let settings = e.ctx.settings_path();
+    let text = std::fs::read_to_string(&settings).unwrap();
+    std::fs::write(&settings, format!("max_budget_usd = 0.5\n{text}")).unwrap();
+    e.fake.push(vec![
+        common::init(),
+        json!({"type": "result", "subtype": "error_max_budget_usd", "is_error": true, "session_id": "@SID@", "total_cost_usd": 0.52, "result": ""})
+            .to_string(),
+    ]);
+    let path = new_record(&e, "capped");
+    edit(&path, |r| r.requests.delegate = true);
+    let (r, _) = runner(&e);
+    let mut r = r.with_retry_base_s(0);
+    r.start().unwrap();
+    r.tick();
+    r.tick();
+    let rec = load(&path);
+    assert_eq!(e.fake.flag(1, "--max-budget-usd").as_deref(), Some("0.50"));
+    assert_eq!(rec.state, State::Failed, "{}", rec.log);
+    assert!(rec.log.contains("define: stopped: spend cap reached: Claude Code stopped after $0.52"), "{}", rec.log);
+    assert_eq!(e.fake.calls(), 1);
+    assert!((rec.cost_usd - 0.52).abs() < 1e-9, "{}", rec.cost_usd);
     r.shutdown(true);
 }

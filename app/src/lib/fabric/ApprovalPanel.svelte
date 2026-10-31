@@ -4,9 +4,10 @@
   import Segmented from '../ui/Segmented.svelte';
   import type { ApprovalDecision } from './approval';
   import type { Approval, Assertion, Grants, PlanMeta, Scope } from './types';
+  import { DISCUSS_HINT, DISCUSS_LABEL, openSession } from './sessions';
   import { ConflictError } from './write';
 
-  let { approval, grants, planMeta, plan, assertions, onsubmit, onreload }: {
+  let { approval, grants, planMeta, plan, assertions, onsubmit, onreload, folder = '', planSession = null, onredo }: {
     approval: Approval;
     grants: Grants;
     planMeta: PlanMeta | null;
@@ -14,6 +15,9 @@
     assertions: Assertion[];
     onsubmit?: (d: ApprovalDecision) => Promise<void>;
     onreload?: () => Promise<void> | void;
+    folder?: string;
+    planSession?: string | null;
+    onredo?: () => Promise<void> | void;
   } = $props();
 
   let scopes = $state<Record<string, Scope>>({});
@@ -23,6 +27,7 @@
   let busy = $state(false);
   let error = $state('');
   let conflict = $state(false);
+  let discussed = $state('');
 
   const scopeOf = (f: string): Scope => scopes[f] ?? 'task';
   const scopeOptions: { value: Scope; label: string }[] = [
@@ -59,6 +64,11 @@
 
   const approve = () => send({ status: 'approved', granted: grants.requested.filter((f) => !skipped[f]).map((f) => ({ field: f, scope: scopeOf(f) })) });
   const refuse = () => send({ status: 'refused', note });
+
+  async function discuss() {
+    const r = await openSession(folder, planSession!);
+    discussed = r.opened ? 'Opened in your terminal.' : r.message;
+  }
 
   async function reload() {
     error = '';
@@ -116,6 +126,16 @@
             <ul class="list">{#each planMeta.assumptions as a (a.rule_id)}<li><b>{a.rule_id}</b>: {a.text}</li>{/each}</ul>
           </section>
         {/if}
+      {/if}
+
+      {#if planSession && folder}
+        <section>
+          <div class="row">
+            <Button variant="tint" data-testid="discuss-plan" onclick={discuss}>{DISCUSS_LABEL}</Button>
+            {#if onredo}<Button variant="tint" disabled={busy} data-testid="approval-redo-plan" onclick={onredo}>Redo plan</Button>{/if}
+          </div>
+          <p class="dim" data-testid="discuss-hint">{discussed ? `${discussed} ` : ''}{DISCUSS_HINT}</p>
+        </section>
       {/if}
 
       {#if !onsubmit}

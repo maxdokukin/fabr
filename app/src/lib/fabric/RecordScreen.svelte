@@ -286,7 +286,7 @@
     </Group>
 
     {#if ap && !readonly}
-      <ApprovalPanel approval={ap} grants={record.grants} planMeta={pm} plan={s.plan} assertions={record.assertions} onsubmit={onapprove} {onreload} />
+      <ApprovalPanel approval={ap} grants={record.grants} planMeta={pm} plan={s.plan} assertions={record.assertions} onsubmit={onapprove} {onreload} {folder} planSession={record.sessions.plan} onredo={mayRedo ? () => ask('redo_plan') : undefined} />
     {:else}
       <Group header="Grants">
         <div class="blk">

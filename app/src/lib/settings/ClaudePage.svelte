@@ -41,6 +41,7 @@
     <Row label="Result" wrap>
       <span class="row-result" class:row-result--bad={!p.results.claude.ok}><span class="row-dot" class:row-dot--ok={p.results.claude.ok} class:row-dot--error={!p.results.claude.ok}></span>{p.results.claude.text}</span>
     </Row>
+    {#if p.results.claude.auth}<Row label="Signed in" value={p.results.claude.auth} />{/if}
   {/if}
 </Group>
 
@@ -48,6 +49,11 @@
   <Row label="Auto mode"><Switch label="Auto mode" bind:checked={auto} onchange={(v) => p.write({ auto_mode: v })} /></Row>
   <NumField label="Question budget" mode="numeric" bad={!!p.runnerError} bind:value={p.budgetText} oncommit={() => p.saveRunner()} />
   <NumField label="Heartbeat" unit="seconds" mode="numeric" bad={!!p.runnerError} bind:value={p.heartbeatText} oncommit={() => p.saveRunner()} />
+</Group>
+
+<Group header="Limits" footer={p.limitsError ?? 'A run stops when it reaches the spend cap or the time limit.'} error={!!p.limitsError}>
+  <NumField label="Spend cap per run (USD, 0 = none)" mode="decimal" bad={!!p.limitsError} bind:value={p.budgetUsdText} oncommit={() => p.saveLimits()} />
+  <NumField label="Run time limit (minutes)" mode="numeric" bad={!!p.limitsError} bind:value={p.timeoutMinText} oncommit={() => p.saveLimits()} />
 </Group>
 
 <Group header="Machine" footer="{HELP[execute]} The runner detects tools and checks and refreshes them when it starts.">

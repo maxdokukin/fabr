@@ -3,6 +3,8 @@ import { render } from 'svelte/server';
 import { createMockApi } from '../../mock/api';
 import { ago, newestFirst, nodeFolder, sessionTitle } from '../fabric/cc';
 import TranscriptView from '../fabric/TranscriptView.svelte';
+import ApprovalPanel from '../fabric/ApprovalPanel.svelte';
+import SessionsBlock from '../fabric/SessionsBlock.svelte';
 import KnowledgeGroup from './KnowledgeGroup.svelte';
 
 const api = createMockApi({ latency: 0 });
@@ -52,5 +54,32 @@ describe('render', () => {
     const k = { rules: 'R1', knowledge: 'K1', learned: [{ id: 'l1', text: 'Use pnpm', applies_when: 'installing', scope: 'project', count: 3, source_tasks: [] }] };
     const { body } = render(KnowledgeGroup, { props: { k, onsave: () => {}, onforget: () => {} } });
     for (const t of ['Rules', 'Knowledge', 'How the agent must behave in this folder', 'Facts about this folder', 'R1', 'K1', 'Use pnpm', 'When installing', 'x3', 'Forget']) expect(body).toContain(t);
+  });
+  const ID = '3f2b8c1e-4d5a-4e6f-9a7b-0c1d2e3f4a5b';
+  const approval = { status: 'pending' as const, by: null, at: null, note: null, digest: null };
+  const grants = { requested: [], granted: [] };
+  it('approval panel offers to discuss the plan with the hint and redo', () => {
+    const props = { approval, grants, planMeta: null, plan: 'P', assertions: [], onsubmit: async () => {}, folder: '/x', planSession: ID, onredo: () => {} };
+    const { body } = render(ApprovalPanel, { props });
+    for (const t of ['Discuss plan in Claude Code', 'When you are done, press Redo plan and the planner picks up the conversation.', 'Redo plan']) expect(body).toContain(t);
+    expect(render(ApprovalPanel, { props: { ...props, planSession: null } }).body).not.toContain('Discuss plan');
+  });
+  it('sessions block puts the discuss action on the planner row only', () => {
+    const one = render(SessionsBlock, { props: { sessions: { plan: ID, execute: null, evaluate: null }, folder: '/x' } }).body;
+    expect(one).toContain('session-discuss');
+    const two = render(SessionsBlock, { props: { sessions: { plan: null, execute: ID, evaluate: null }, folder: '/x' } }).body;
+    expect(two).not.toContain('session-discuss');
+  });
+});
+
+describe('claude limits', () => {
+  it('round trips through the mock settings', async () => {
+    const r = await api.fabricSettingsRead();
+    expect([r.settings.max_budget_usd, r.settings.execute_timeout_s]).toEqual([0, 1800]);
+    const w = await api.fabricSettingsWrite({ ...r.settings, max_budget_usd: 2.5, execute_timeout_s: 600 });
+    expect([w.settings.max_budget_usd, w.settings.execute_timeout_s]).toEqual([2.5, 600]);
+  });
+  it('mock claude check reports sign-in', async () => {
+    expect(await api.fabricCheck({ kind: 'claude' })).toMatchObject({ ok: true, logged_in: true, auth: 'claude.ai, max' });
   });
 });

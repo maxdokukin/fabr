@@ -67,3 +67,10 @@ pub fn check_timeout_s(space: &Path) -> u64 {
 pub fn execute_timeout_s(space: &Path) -> u64 {
     doc_of(space).map(|d| read_execute_timeout(&d)).unwrap_or(DEFAULT_EXECUTE_TIMEOUT_S)
 }
+
+pub fn max_budget_usd(space: &Path) -> f64 {
+    doc_of(space)
+        .and_then(|d| d.get("max_budget_usd").and_then(|v| v.as_float().or_else(|| v.as_integer().map(|n| n as f64))))
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(0.0)
+}

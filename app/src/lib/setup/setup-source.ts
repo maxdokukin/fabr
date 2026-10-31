@@ -35,13 +35,13 @@ export function emptySettings(): FabricSettings {
   return {
     default_folder: '', model: '', telegram_user_id: null, auto_mode: false,
     question_budget: 5, heartbeat_interval_s: 10, execute: 'full', capabilities: { tools: [], checks: [] }, setup: { completed_steps: [], completed: false },
-    claude_bin: '', effort: '',
+    claude_bin: '', effort: '', max_budget_usd: 0, execute_timeout_s: 1800,
   };
 }
 
 const OK: Record<StubKey, FabricCheckResult> = {
   folder: { ok: true },
-  claude: { ok: true, version: '2.1.287 (Claude Code)', path: '/usr/local/bin/claude' },
+  claude: { ok: true, version: '2.1.287 (Claude Code)', path: '/usr/local/bin/claude', logged_in: true, auth: 'claude.ai, max' },
   telegram_token: { ok: true, bot_name: 'test_bot' },
   telegram_link: { ok: true, user_id: 123456789 },
 };

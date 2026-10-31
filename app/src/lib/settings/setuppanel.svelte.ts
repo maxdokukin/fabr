@@ -1,7 +1,7 @@
 import { errText, type FabricCheckResult, type FabricSecretsStatus, type FabricSettings } from '../api/types';
 import { createSetupSource, type SetupSource } from '../setup/setup-source';
 
-export interface Outcome { ok: boolean; text: string }
+export interface Outcome { ok: boolean; text: string; auth?: string }
 export type Probe = 'claude' | 'token' | 'link';
 
 const NO_SECRETS: FabricSecretsStatus = { telegram_bot_token: false };
@@ -12,6 +12,13 @@ export function parseWhole(text: string, min: number, max: number): number | nul
   if (!/^\d+$/.test(t)) return null;
   const n = Number(t);
   return n >= min && n <= max ? n : null;
+}
+
+export function parseUsd(text: string): number | null {
+  const t = text.trim();
+  if (!/^\d+(\.\d{1,2})?$/.test(t)) return null;
+  const n = Number(t);
+  return n <= 100000 ? n : null;
 }
 
 export class SetupPanel {
@@ -25,6 +32,9 @@ export class SetupPanel {
   budgetText = $state('');
   heartbeatText = $state('');
   runnerError = $state<string | null>(null);
+  budgetUsdText = $state('0');
+  timeoutMinText = $state('30');
+  limitsError = $state<string | null>(null);
 
   private src: SetupSource | null = null;
   private factory: () => Promise<SetupSource>;
@@ -54,6 +64,7 @@ export class SetupPanel {
     this.results = {};
     this.error = null;
     this.runnerError = null;
+    this.limitsError = null;
   }
 
   async load(): Promise<void> {
@@ -73,6 +84,8 @@ export class SetupPanel {
     this.settings = s;
     this.budgetText = String(s.question_budget);
     this.heartbeatText = String(s.heartbeat_interval_s);
+    this.budgetUsdText = String(s.max_budget_usd);
+    this.timeoutMinText = String(Math.round(s.execute_timeout_s / 60));
   }
 
   private async guard(work: () => Promise<void>): Promise<boolean> {
@@ -114,7 +127,7 @@ export class SetupPanel {
     delete this.results[kind];
     try {
       const r = await work();
-      this.results[kind] = r.ok ? { ok: true, text: good(r) } : { ok: false, text: r.reason };
+      this.results[kind] = r.ok ? { ok: true, text: good(r), auth: r.auth } : { ok: false, text: r.reason };
     } catch (e) {
       this.results[kind] = { ok: false, text: errText(e) };
     }
@@ -162,5 +175,14 @@ export class SetupPanel {
     if (budget === null || beat === null || !this.settings) return false;
     if (budget === this.settings.question_budget && beat === this.settings.heartbeat_interval_s) return true;
     return this.write({ question_budget: budget, heartbeat_interval_s: beat });
+  }
+
+  async saveLimits(): Promise<boolean> {
+    const usd = parseUsd(this.budgetUsdText);
+    const min = parseWhole(this.timeoutMinText, 1, 240);
+    this.limitsError = usd === null ? 'Spend cap must be an amount in USD, 0 for none.' : min === null ? 'Run time limit must be a whole number of minutes from 1 to 240.' : null;
+    if (usd === null || min === null || !this.settings) return false;
+    if (usd === this.settings.max_budget_usd && min * 60 === this.settings.execute_timeout_s) return true;
+    return this.write({ max_budget_usd: usd, execute_timeout_s: min * 60 });
   }
 }

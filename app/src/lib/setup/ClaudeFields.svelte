@@ -6,7 +6,7 @@
     bin: string;
     model: string;
     effort: string;
-    found?: { path?: string; version?: string } | null;
+    found?: { path?: string; version?: string; auth?: string } | null;
     onbin?: () => void;
     onpick?: () => void;
   } = $props();
@@ -17,6 +17,7 @@
 </Row>
 {#if found?.path}<Row label="Found" value={found.path} wrap />{/if}
 {#if found?.version}<Row label="Version" value={found.version} />{/if}
+{#if found?.auth}<Row label="Signed in" value={found.auth} />{/if}
 <Row label="Model">
   <select class="row-input" bind:value={model} onchange={onpick} aria-label="Model">{#each MODELS as o (o.value)}<option value={o.value}>{o.label}</option>{/each}</select>
 </Row>

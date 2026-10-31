@@ -165,7 +165,8 @@ fn stage_error(record_path: &Path, ctl: &Ctl, err: FabrError) -> Result<(), Fabr
         let label = stage_label(r);
         let count = trailing_error(&r.log, label).map_or(0, |e| e.count) + 1;
         append_log(&mut r.log, label, &format!("error {count}: {message}"));
-        if count < MAX_STAGE_ERRORS {
+        let fatal = message.starts_with(crate::claude::SPEND_CAP);
+        if count < MAX_STAGE_ERRORS && !fatal {
             return None;
         }
         r.state = State::Failed;
@@ -173,7 +174,8 @@ fn stage_error(record_path: &Path, ctl: &Ctl, err: FabrError) -> Result<(), Fabr
         r.waiting = false;
         r.verdict = None;
         r.requests.delegate = false;
-        append_log(&mut r.log, label, &format!("failed after {count} errors: {message}"));
+        let why = if fatal { "stopped".to_string() } else { format!("failed after {count} errors") };
+        append_log(&mut r.log, label, &format!("{why}: {message}"));
         Some(())
     });
     match outcome {

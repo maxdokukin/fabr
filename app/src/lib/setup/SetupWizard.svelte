@@ -31,7 +31,7 @@
   let claudeBin = $state(seed?.claude_bin ?? '');
   let model = $state(seed?.model ?? '');
   let effort = $state(seed?.effort ?? '');
-  let found = $state<{ path?: string; version?: string } | null>(null);
+  let found = $state<{ path?: string; version?: string; auth?: string } | null>(null);
   let token = $state('');
   let botName = $state<string | null>(null);
   let waiting = $state(false);
@@ -92,7 +92,7 @@
   const checkFolder = () => run(() => src!.check('folder', { path: folder.trim() }), async () => { await persist({ default_folder: folder.trim() }, 'folder'); folder = settings!.default_folder; });
 
   const checkClaude = () => run(() => src!.check('claude', { path: claudeBin.trim() }), async (r) => {
-    found = { path: r.path, version: r.version };
+    found = { path: r.path, version: r.version, auth: r.auth };
     await persist({ claude_bin: claudeBin.trim(), model, effort }, 'claude');
   });
 

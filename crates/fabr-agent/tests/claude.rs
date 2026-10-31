@@ -199,3 +199,37 @@ fn live_claude_code_runs_a_tiny_task_end_to_end() {
     assert!(rec.sessions.plan.is_some() && rec.sessions.execute.is_some() && rec.sessions.evaluate.is_some());
     assert!(rec.cost_usd > 0.0);
 }
+
+#[test]
+fn an_executor_that_skips_the_structured_result_is_nudged_then_done_with_its_text() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = FakeClaude::new(tmp.path());
+    let prose = |text: &str, cost: f64| {
+        json!({"type": "result", "subtype": "success", "is_error": false, "session_id": "@SID@", "total_cost_usd": cost, "result": text})
+            .to_string()
+    };
+    fake.push(vec![init(), tool_use("Write", json!({"file_path": "a.md"})), prose("Wrote a.md with the list.", 0.2)]);
+    fake.push(vec![init(), prose("I already called it.", 0.05)]);
+    let engine = ClaudeEngine::new(&fake.bin);
+    let allowed = vec!["Read".to_string(), "Write".to_string()];
+    let input = fabr_agent::ExecuteInput {
+        cwd: tmp.path(),
+        resume: None,
+        title: "write a list",
+        spec: "",
+        plan: "",
+        assertions: &[],
+        answers: "",
+        allowed: &allowed,
+        read_only: false,
+    };
+    let run = engine.execute(&input, &mut NoWatch);
+    assert_eq!(fake.calls(), 2);
+    assert_eq!(fake.flag(2, "--resume"), fake.flag(1, "--session-id"));
+    assert_eq!(fake.flag(1, "--name").as_deref(), Some("fabr execute: write a list"));
+    assert!((run.cost_usd - 0.25).abs() < 1e-9);
+    match run.end {
+        End::Done(out) => assert_eq!((out.status, out.summary.as_str()), (fabr_agent::ExecStatus::Done, "Wrote a.md with the list.")),
+        other => panic!("{other:?}"),
+    }
+}

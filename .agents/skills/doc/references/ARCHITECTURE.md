@@ -1,6 +1,6 @@
 # Architecture
 
-Fabric takes a line dumped into a folder and turns it into a task. An agent defines, plans, runs and checks the task, and the user approves it. This file is the big picture: the layers, the status legend, the 26 blocks with what is built today, and what the app looks like.
+Fabric takes a line dumped into a folder and turns it into a task. Claude Code, installed on the machine, does the thinking: one session plans the task, a second runs the plan, and a third checks the result, and the user approves in between. Fabric is the aggregator around those sessions. It keeps each task, its plan and its session ids in the folder the task belongs to, so reminders and Claude Code sessions live in one place. This file is the big picture: the layers, the status legend, the 26 blocks with what is built today, and what the app looks like.
 
 ## Status legend
 
@@ -18,41 +18,41 @@ Fabric takes a line dumped into a folder and turns it into a task. An agent defi
 |---|---|
 | Channels | how the user touches it |
 | Core | the record store, the sequencer, the registry, the notifier |
-| Agents | model workers with one job each |
+| Agents | Claude Code sessions with one job each: planner, executor, validator |
 | Knowledge | files the agents read, merged by precedence: nearer folder wins, project over global |
 | Private data and tools | where values and side effects live |
 
-Everything above the knowledge layer reads and writes the task record in the folder. The context gatherer is not a model: it walks the folder chain and merges knowledge. The executor is the only agent with side effects. The data bank hands values to fill, never to an agent, and every fill lands in the audit log. The orchestrator is the only sequencer and the only writer of `state`, except the done-by-hand exception in `CONTRACT.md`.
+Everything above the knowledge layer reads and writes the task record in the folder. The context gatherer is not a model: it walks the folder chain and merges knowledge. The executor is the only agent with side effects, and it runs with edits allowed inside the task's folder only. The data bank hands values to fill, never to an agent, and every fill lands in the audit log. The orchestrator is the only sequencer and the only writer of `state`, except the done-by-hand exception in `CONTRACT.md`.
 
 ## The 26 blocks
 
 | Layer | Block | Status | Where it lives, or what is missing |
 |---|---|---|---|
-| Channels | First-run setup | built | `fabr-core/src/setup.rs`, `app/src/lib/setup/`; six screens |
+| Channels | First-run setup | built | `fabr-core/src/setup.rs`, `app/src/lib/setup/`; folder, Claude Code (version and sign-in), optional Telegram |
 | Channels | Input capture | parallel | the app has an add-task line and sheet; speech and photo are wave 4 |
 | Channels | Local GUI | built | `app/`, a Svelte 5 and Tauri 2 desktop app |
-| Channels | Telegram bot | planned | setup checks and the link command exist; no send or receive; wording in `TELEGRAM.md` |
-| Core | Task record store | built | `fabr-core/src/taskrec.rs`, per-folder flock |
+| Channels | Telegram bot | built | `fabr-core/src/telegram.rs`, driven from `runner/mod.rs`; untested against the real Bot API |
+| Core | Task record store | built | `fabr-core/src/taskrec.rs`, per-folder flock, schema 7 |
 | Core | Task index | planned | no sqlite; the app polls a stamp over the tree |
 | Core | Orchestrator | built | `fabr-agent/src/lifecycle.rs`, hosted in the desktop app |
 | Core | Agent registry | built | `fabr-agent/src/board.rs`, heartbeat in `runner/` |
-| Core | Notifier | stub | writes `events.log`; fan-out to Telegram is planned |
+| Core | Notifier | built | `events.log` plus Telegram notices |
 | Agents | Organizer | parallel | not in this repo |
-| Agents | Context gatherer | stub | lists the node's own files; the folder-chain walk and merge are planned |
-| Agents | Definer | built | model call in `lifecycle.rs` and `model.rs` |
-| Agents | Planner | built | same; writes `plan_meta` and the digest |
-| Agents | Executor | stub | runs `read_file`, `write_file`, `list_dir` plan lines; the tool loop is planned |
-| Agents | Evaluator | stub | runs allowlisted checks; a model evaluator is planned |
-| Agents | Learner | stub | logs "deferred" |
-| Knowledge | Machine settings | built | `settings.toml`, `secrets.toml` |
-| Knowledge | Global rules and preferences | planned | no files, no editor |
-| Knowledge | Project knowledge and preferences | planned | same |
-| Knowledge | Learned preferences | planned | wave 2 |
+| Agents | Context gatherer | built | `gather_bundle` in `lifecycle.rs`: folder chain, rules, knowledge, learned answers, file listing |
+| Agents | Definer | built | planner session, `claude.rs` `define` |
+| Agents | Planner | built | the same session resumed, `claude.rs` `plan`; Inputs, Outputs, Steps |
+| Agents | Executor | built | executor session, `claude.rs` `execute`, acceptEdits in the task folder |
+| Agents | Evaluator | built | allowlisted checks, then a read-only validator session |
+| Agents | Learner | built | `fabr-core/src/knowledge.rs` `capture`: answers to `learned.yaml`; no classification into preference, data or procedure |
+| Knowledge | Machine settings | built | `settings.toml`, `secrets.toml` (bot token only) |
+| Knowledge | Global rules and preferences | built | `.fabric-space/.agents/rules.md` and `knowledge.md` at the root, edited in node settings |
+| Knowledge | Project knowledge and preferences | built | the same files in any folder; nearer folder listed first |
+| Knowledge | Learned preferences | stub | captured and shown to the planner; no once, always or no prompt |
 | Knowledge | Past executions | planned | wave 2 search over finished records |
 | Private | Personal data bank | planned | no vault, policy or crypto |
-| Private | Fill at the sink | planned | no browser or HTTP tool |
+| Private | Fill at the sink | planned | Claude Code has WebFetch; no form filling with granted values |
 | Private | Audit log | planned | comes with fill |
-| Private | Tool set | stub | three file tools; browser, HTTP and ask-user are planned |
+| Private | Tool set | built | Claude Code's own tools, limited per task by `plan_meta.tools` |
 | Private | Personal context connectors | named | never built in wave 1 |
 
 ## The app
@@ -62,5 +62,7 @@ Everything above the knowledge layer reads and writes the task record in the fol
 - Tasks are created from the node panel: an "Add task" line opens a sheet with title, due, priority, context, spec and success. A reminder is also what the UI labels a todo.
 - A stage bar for each node and each task, and an Agents sheet opened from the toolbar badge, show progress. Both are fed by the record's `step` and the registry entry.
 - Remote ssh nodes list their tasks read-only through the snapshot.
-- The app hosts the agent runner in-process. It starts when setup is complete and stops on exit. `fabr agent` runs the same runner as a debug entry point.
+- The app hosts the agent runner in-process. It starts when setup has the `folder` and `claude` steps and stops on exit, which also kills any running Claude Code process. `fabr agent` runs the same runner as a debug entry point.
+- A task sheet lists its planner, executor and validator sessions with Open in terminal (`claude --resume <id>` in the task's folder), Copy command and Transcript.
+- Node settings list every Claude Code session that ran in that folder, read from `~/.claude/projects/`, with a New session here button, and hold the folder's rules, knowledge and learned answers.
 - The frontend parses records in one place, `app/src/lib/fabric/parse.ts`, and tests against `fixtures/`.

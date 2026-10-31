@@ -189,7 +189,7 @@ export interface Capabilities { tools: string[]; checks: string[] }
 export interface FabricSettings {
   default_folder: string; model: string; telegram_user_id: number | null; auto_mode: boolean;
   question_budget: number; heartbeat_interval_s: number; execute: ExecuteMode; capabilities: Capabilities; setup: SetupState;
-  claude_bin: string; effort: string;
+  claude_bin: string; effort: string; max_budget_usd: number; execute_timeout_s: number;
 }
 export interface FabricSettingsRead { exists: boolean; settings: FabricSettings }
 export interface FabricSecretsWriteReq { telegram_bot_token?: string }
@@ -209,5 +209,5 @@ export interface FabricAgentStatus { running: boolean; reason: string | null }
 export type FabricCheckKind = 'folder' | 'claude' | 'telegram_token';
 export interface FabricCheckReq { kind: FabricCheckKind; path?: string }
 export type FabricCheckResult =
-  | { ok: true; version?: string; path?: string; bot_name?: string; user_id?: number }
+  | { ok: true; version?: string; path?: string; logged_in?: boolean; auth?: string; bot_name?: string; user_id?: number }
   | { ok: false; reason: string };

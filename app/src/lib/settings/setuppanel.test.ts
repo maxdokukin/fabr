@@ -14,7 +14,7 @@ describe('setup panel', () => {
     const { p } = await panel();
     expect(p.claudeReady).toBe(false);
     await p.testClaude('');
-    expect(p.results.claude).toEqual({ ok: true, text: '2.1.287 (Claude Code) at /usr/local/bin/claude' });
+    expect(p.results.claude).toEqual({ ok: true, text: '2.1.287 (Claude Code) at /usr/local/bin/claude', auth: 'claude.ai, max' });
   });
 
   it('reports a failed Claude Code check', async () => {
@@ -27,6 +27,18 @@ describe('setup panel', () => {
     const { src, p } = await panel();
     expect(await p.write({ model: 'opus', effort: 'high', claude_bin: '/opt/claude' })).toBe(true);
     expect(src.settings).toMatchObject({ model: 'opus', effort: 'high', claude_bin: '/opt/claude' });
+  });
+
+  it('validates and stores the spend cap and time limit', async () => {
+    const { src, p } = await panel();
+    expect([p.budgetUsdText, p.timeoutMinText]).toEqual(['0', '30']);
+    p.budgetUsdText = 'x';
+    expect(await p.saveLimits()).toBe(false);
+    expect(p.limitsError).toBeTruthy();
+    p.budgetUsdText = '2.5';
+    p.timeoutMinText = '10';
+    expect(await p.saveLimits()).toBe(true);
+    expect(src.settings).toMatchObject({ max_budget_usd: 2.5, execute_timeout_s: 600 });
   });
 
   it('links, then unlinks the telegram user', async () => {

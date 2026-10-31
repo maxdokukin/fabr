@@ -3,6 +3,8 @@ import { ApiError, errText } from '../api/types';
 import type { Sessions } from './types';
 
 const LABELS: [keyof Sessions, string][] = [['plan', 'Planner'], ['execute', 'Executor'], ['evaluate', 'Validator']];
+export const DISCUSS_LABEL = 'Discuss plan in Claude Code';
+export const DISCUSS_HINT = 'When you are done, press Redo plan and the planner picks up the conversation.';
 const PLAIN = /^[\w./~@%+=:,-]+$/;
 
 export const shellQuote = (s: string): string => (PLAIN.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
