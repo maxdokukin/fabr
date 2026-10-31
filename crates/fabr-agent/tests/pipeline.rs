@@ -47,12 +47,12 @@ fn defined() -> DefineOut {
         spec: "Write greet.md containing hi".into(),
         success: "greet.md contains hi".into(),
         assertions: vec![DraftAssertion { id: "a1".into(), text: "greet.md contains hi".into() }],
-        grants: vec![],
+        ..Default::default()
     }
 }
 
 fn asks(q: &str) -> DefineOut {
-    DefineOut { question: Some(q.into()), spec: String::new(), success: String::new(), assertions: vec![], grants: vec![] }
+    DefineOut { question: Some(q.into()), ..Default::default() }
 }
 
 const PLAN: &str = "### Inputs\nnone\n\n### Outputs\ngreet.md\n\n### Steps\n1. Write greet.md";

@@ -59,6 +59,7 @@ export const COMMANDS = {
   fabricKnowledgeRead: op<[folder: string], NodeKnowledge>({ req: (folder) => ({ folder }) }),
   fabricKnowledgeWrite: op<[folder: string, kind: KnowledgeKind, text: string], NodeKnowledge>({ req: (folder, kind, text) => ({ folder, kind, text }) }),
   fabricLearnedForget: op<[folder: string, id: string], NodeKnowledge>({ req: (folder, id) => ({ folder, id }) }),
+  fabricLearnedAlways: op<[folder: string, id: string, always: boolean], NodeKnowledge>({ req: (folder, id, always) => ({ folder, id, always }) }),
   fabricAgentStatus: op<[], FabricAgentStatus>({}),
   fabricAgentStart: op<[], FabricAgentStatus>({}),
   installKey: op<[req: InstallKeyReq], InstallKeyResult>({ req: self }),

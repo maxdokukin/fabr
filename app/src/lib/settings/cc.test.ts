@@ -7,6 +7,7 @@ import ApprovalPanel from '../fabric/ApprovalPanel.svelte';
 import SessionsBlock from '../fabric/SessionsBlock.svelte';
 import TranscriptSheet from '../fabric/TranscriptSheet.svelte';
 import KnowledgeGroup from './KnowledgeGroup.svelte';
+import QuestionPanel from '../fabric/QuestionPanel.svelte';
 
 const api = createMockApi({ latency: 0 });
 const ID2 = '3f2b8c1e-4d5a-4e6f-9a7b-0c1d2e3f4a5b';
@@ -34,6 +35,13 @@ describe('mock claude code api', () => {
     expect(k.rules).toBe('Be brief.');
     const id = k.learned[0].id;
     expect((await api.fabricLearnedForget('/x', id)).learned.find((l) => l.id === id)).toBeUndefined();
+  });
+  it('turns always on and off for a learned record', async () => {
+    const api = createMockApi({ latency: 0 });
+    const id = (await api.fabricKnowledgeRead('/x')).learned[0].id;
+    expect((await api.fabricLearnedAlways('/x', id, true)).learned[0].always).toBe(true);
+    expect((await api.fabricLearnedAlways('/x', id, false)).learned[0].always).toBe(false);
+    await expect(api.fabricLearnedAlways('/x', 'nope', true)).rejects.toThrow();
   });
 });
 
@@ -63,8 +71,17 @@ describe('render', () => {
   });
   it('knowledge group shows both fields and learned records with Forget', () => {
     const k = { rules: 'R1', knowledge: 'K1', learned: [{ id: 'l1', text: 'Use pnpm', applies_when: 'installing', scope: 'project', count: 3, source_tasks: [] }] };
-    const { body } = render(KnowledgeGroup, { props: { k, onsave: () => {}, onforget: () => {} } });
-    for (const t of ['Rules', 'Knowledge', 'How the agent must behave in this folder', 'Facts about this folder', 'R1', 'K1', 'Use pnpm', 'When installing', 'x3', 'Forget']) expect(body).toContain(t);
+    const props = { k, onsave: () => {}, onforget: () => {}, onalways: () => {} };
+    const { body } = render(KnowledgeGroup, { props });
+    for (const t of ['Rules', 'Knowledge', 'How the agent must behave in this folder', 'Facts about this folder', 'R1', 'K1', 'Use pnpm', 'When installing', 'x3', 'Forget', 'data-testid="always-l1"']) expect(body).toContain(t);
+    expect(body).not.toContain('Stop always');
+    const on = render(KnowledgeGroup, { props: { ...props, k: { ...k, learned: [{ ...k.learned[0], always: true }] } } }).body;
+    for (const t of ['Always · When installing', 'Stop always']) expect(on).toContain(t);
+  });
+  it('a choice question shows the prior and the three answers', () => {
+    const question = { id: 'q2', kind: 'choice' as const, text: 'Ship home again?', options: ['once', 'always', 'no'], prior: { text: 'Ship to home', source_task: '/p/.fabric-space/tasks/2026-10-01-order.md', last_confirmed: '2026-10-01T00:00:00Z' }, fields: null, asked_at: '2026-10-31T10:00:00Z', answer: null };
+    const { body } = render(QuestionPanel, { props: { question, onsubmit: async () => {} } });
+    for (const t of ['Ship home again?', 'Last time: Ship to home', 'From 2026-10-01-order, confirmed 2026-10-01', 'Once', 'Always', 'No, something else']) expect(body).toContain(t);
   });
   const ID = '3f2b8c1e-4d5a-4e6f-9a7b-0c1d2e3f4a5b';
   const approval = { status: 'pending' as const, by: null, at: null, note: null, digest: null };
@@ -74,6 +91,24 @@ describe('render', () => {
     const { body } = render(ApprovalPanel, { props });
     for (const t of ['Discuss plan in Claude Code', 'When you are done, press Redo plan and the planner picks up the conversation.', 'Redo plan']) expect(body).toContain(t);
     expect(render(ApprovalPanel, { props: { ...props, planSession: null } }).body).not.toContain('Discuss plan');
+  });
+  const planMeta = { reversibility: 'reversible' as const, tools: ['Write', 'Bash(npm test:*)', 'WebFetch'], requires: { tools: [], checks: [] }, assumptions: [] as { rule_id: string; text: string }[], checks: [{ cmd: 'test', args: ['-f', 'greet.md'] }] };
+  it('approval panel lists assumed always-rules only when there are some', () => {
+    const props = { approval, grants, planMeta, plan: 'P', assertions: [], onsubmit: async () => {} };
+    expect(render(ApprovalPanel, { props }).body).not.toContain('Assumed');
+    const { body } = render(ApprovalPanel, { props: { ...props, planMeta: { ...planMeta, assumptions: [{ rule_id: 'l1', text: 'Ship to home' }] } } });
+    for (const t of ['Assumed', 'Ship to home', 'Applied because you chose Always.']) expect(body).toContain(t);
+  });
+  it('approval panel shows what Claude Code may use above Approve', () => {
+    const props = { approval, grants, planMeta, plan: 'P', assertions: [], onsubmit: async () => {} };
+    const { body } = render(ApprovalPanel, { props });
+    for (const t of ['Claude Code may use', 'Write', 'test -f greet.md']) expect(body).toContain(t);
+    expect(body).toMatch(/chip muted[^"]*">Read</);
+    expect(body).toMatch(/hot">Bash\(npm test:\*\)<!--\[0--><small[^>]*>runs commands/);
+    expect(body).toMatch(/hot">WebFetch<!--\[0--><small[^>]*>uses the network/);
+    expect(body.indexOf('Claude Code may use')).toBeLessThan(body.indexOf('Approve'));
+    expect(body).not.toContain('Irreversible');
+    expect(render(ApprovalPanel, { props: { ...props, planMeta: { ...planMeta, reversibility: 'irreversible' as const } } }).body).toContain('Irreversible: once this runs it cannot be undone.');
   });
   it('sessions block puts the discuss action on the planner row only', () => {
     const one = render(SessionsBlock, { props: { sessions: { plan: ID, execute: null, evaluate: null }, folder: '/x' } }).body;

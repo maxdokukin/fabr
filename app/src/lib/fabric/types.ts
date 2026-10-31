@@ -40,7 +40,7 @@ export interface Question {
   kind: QuestionKind;
   text: string;
   options: string[] | null;
-  prior: { text: string; source_task: string; last_confirmed: string } | null;
+  prior: { text: string; source_task?: string | null; last_confirmed?: string | null } | null;
   fields: string[] | null;
   asked_at: string;
   answer: Answer | null;

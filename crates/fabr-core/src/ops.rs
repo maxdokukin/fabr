@@ -5,7 +5,7 @@ use crate::dto::{
 };
 use crate::error::FabrError;
 use crate::fabric::{self, FabricCreateReq, FabricListReq, FabricReadReq, FabricStampReq, FabricWriteReq, ImportTodosReq};
-use crate::knowledge::{self, KnowledgeReadReq, KnowledgeWriteReq, LearnedForgetReq};
+use crate::knowledge::{self, KnowledgeReadReq, KnowledgeWriteReq, LearnedAlwaysReq, LearnedForgetReq};
 use crate::settings::Settings;
 use crate::setup::{self, CheckReq, Ctx, LinkReq, SecretsWriteReq, SettingsWriteReq};
 use crate::sources::Source;
@@ -119,6 +119,7 @@ ops! {
     fabric_knowledge_read Post true (KnowledgeReadReq) |_, r| json(knowledge::read(&local_dir(&r.folder)?)?);
     fabric_knowledge_write Post true (KnowledgeWriteReq) |_, r| json(knowledge::write(&local_dir(&r.folder)?, &r.kind, &r.text)?);
     fabric_learned_forget Post true (LearnedForgetReq) |_, r| json(knowledge::forget(&local_dir(&r.folder)?, &r.id)?);
+    fabric_learned_always Post true (LearnedAlwaysReq) |_, r| json(knowledge::set_always(&local_dir(&r.folder)?, &r.id, r.always)?);
 }
 
 fn cc_send(r: &SendReq) -> Result<ccsession::SendRes, FabrError> {
@@ -224,6 +225,10 @@ mod cc_tests {
         assert!(run("fabric_knowledge_write", json!({"folder": f, "kind": "nope", "text": "x"})).is_err());
         assert!(run("fabric_knowledge_read", json!({"folder": "relative"})).is_err());
         assert!(run("fabric_learned_forget", json!({"folder": format!("{f}/nope"), "id": "a"})).is_err());
+        std::fs::write(d.path().join(".fabric-space/.agents/learned.yaml"), "records:\n  - {id: l1, text: Home}\n").unwrap();
+        let k = run("fabric_learned_always", json!({"folder": f, "id": "l1", "always": true})).unwrap();
+        assert_eq!(k["learned"][0]["always"], json!(true));
+        assert!(run("fabric_learned_always", json!({"folder": f, "id": "l2", "always": true})).is_err());
     }
 
     #[test]

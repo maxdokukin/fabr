@@ -47,7 +47,7 @@ Everything above the knowledge layer reads and writes the task record in the fol
 | Knowledge | Machine settings | built | `settings.toml`, `secrets.toml` (bot token only) |
 | Knowledge | Global rules and preferences | built | `.fabric-space/.agents/rules.md` and `knowledge.md` at the root, edited in node settings |
 | Knowledge | Project knowledge and preferences | built | the same files in any folder; nearer folder listed first |
-| Knowledge | Learned preferences | stub | captured and shown to the planner; no once, always or no prompt |
+| Knowledge | Learned preferences | built | the planner cites a learned record; define asks once, always or no; always-rules apply silently and show under Assumed |
 | Knowledge | Past executions | planned | wave 2 search over finished records |
 | Private | Personal data bank | planned | no vault, policy or crypto |
 | Private | Fill at the sink | planned | Claude Code has WebFetch; no form filling with granted values |

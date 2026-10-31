@@ -36,6 +36,12 @@
     return [...groups];
   });
 
+  const priorFrom = $derived.by(() => {
+    const p = question.prior;
+    const task = p?.source_task?.split('/').pop()?.replace(/\.md$/, '');
+    return [task && `From ${task}`, p?.last_confirmed && `confirmed ${p.last_confirmed.slice(0, 10)}`].filter(Boolean).join(', ');
+  });
+
   async function send(a: AnswerInput) {
     if (!onsubmit || busy) return;
     busy = true;
@@ -73,7 +79,7 @@
         <div class="row"><Button variant="primary" disabled={busy || !text.trim()} onclick={() => send({ value: text })}>Send</Button></div>
       {:else if question.kind === 'choice'}
         {#if question.prior}
-          <p class="prior">Last time: {question.prior.text}<br /><span class="dim">from {question.prior.source_task}, last confirmed {question.prior.last_confirmed}</span></p>
+          <p class="prior">Last time: {question.prior.text}{#if priorFrom}<br /><span class="dim">{priorFrom}</span>{/if}</p>
         {/if}
         <div class="row">
           <Button variant="primary" disabled={busy} onclick={() => send({ value: 'once' })}>Once</Button>

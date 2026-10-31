@@ -548,6 +548,15 @@ pub fn approval_digest(rec: &TaskRecord) -> String {
             }
             h.update([8]);
         }
+        if !m.assumptions.is_empty() {
+            h.update([9]);
+            for a in &m.assumptions {
+                h.update(a.rule_id.as_bytes());
+                h.update([10]);
+                h.update(a.text.as_bytes());
+                h.update([11]);
+            }
+        }
     }
     format!("{:x}", h.finalize())
 }
@@ -780,7 +789,13 @@ mod tests {
         let d1 = approval_digest(&rec);
         assert_eq!(d1, approval_digest(&rec));
         rec.plan.push_str("\n7. extra step");
-        assert_ne!(d1, approval_digest(&rec));
+        let d2 = approval_digest(&rec);
+        assert_ne!(d1, d2);
+        let meta = rec.plan_meta.get_or_insert_with(PlanMeta::default);
+        meta.assumptions.clear();
+        let bare = approval_digest(&rec);
+        rec.plan_meta.as_mut().unwrap().assumptions.push(Assumption { rule_id: "l1".into(), text: "Ship home".into() });
+        assert_ne!(bare, approval_digest(&rec));
     }
 
     #[test]

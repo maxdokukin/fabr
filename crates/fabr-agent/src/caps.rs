@@ -94,6 +94,21 @@ pub fn valid_rule(rule: &str) -> bool {
     }
 }
 
+pub fn auto_safe(rule: &str) -> bool {
+    if !valid_rule(rule) {
+        return false;
+    }
+    let local = |spec: &str| {
+        !spec.starts_with('/') && !spec.starts_with('~') && !spec.split('/').any(|p| p == "..") && !spec.contains(".fabric-space")
+    };
+    match rule.split_once('(') {
+        None => matches!(rule, "Read" | "Glob" | "Grep" | "Edit" | "Write" | "MultiEdit" | "NotebookEdit"),
+        Some((name, rest)) => {
+            matches!(name, "Read" | "Glob" | "Grep" | "Edit" | "Write" | "MultiEdit" | "NotebookEdit") && local(rest.trim_end_matches(')'))
+        }
+    }
+}
+
 pub fn executor_rules(meta: Option<&PlanMeta>) -> Vec<String> {
     let mut out: Vec<String> = ALWAYS_GRANTED.iter().map(|t| (*t).to_string()).collect();
     for rule in meta.map(|m| m.tools.as_slice()).unwrap_or_default() {
@@ -170,6 +185,26 @@ pub fn load(ctx: &Ctx) -> Result<Harness, FabrError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_mode_takes_only_local_file_rules() {
+        for ok in ["Write", "Edit", "Edit(notes/*.md)", "Read(./a.md)"] {
+            assert!(auto_safe(ok), "{ok}");
+        }
+        for no in [
+            "Bash(npm test)",
+            "WebFetch",
+            "WebSearch",
+            "Edit(//etc/hosts)",
+            "Edit(/etc/x)",
+            "Write(~/x)",
+            "Edit(../x)",
+            "Edit(.fabric-space/tasks/a.md)",
+            "Bash",
+        ] {
+            assert!(!auto_safe(no), "{no}");
+        }
+    }
     use fabr_core::taskrec::Check;
 
     fn meta(tools: &[&str], checks: &[&str]) -> PlanMeta {

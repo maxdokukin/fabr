@@ -274,6 +274,12 @@ export function createMockApi(opts: MockOpts = {}): Api {
     async fabricKnowledgeRead() { await wait(); return clone(know); },
     async fabricKnowledgeWrite(_f, kind: KnowledgeKind, text) { await wait(); know = { ...know, [kind]: text }; return clone(know); },
     async fabricLearnedForget(_f, id) { await wait(); know = { ...know, learned: know.learned.filter((l) => l.id !== id) }; return clone(know); },
+    async fabricLearnedAlways(_f, id, always) {
+      await wait();
+      if (!know.learned.some((l) => l.id === id)) throw new ApiError(404, `No learned record ${id}`);
+      know = { ...know, learned: know.learned.map((l) => (l.id === id ? { ...l, always } : l)) };
+      return clone(know);
+    },
     async fabricAgentStatus() { return { running: true, reason: null }; },
     async fabricAgentStart() { return { running: true, reason: null }; },
     async fabricCheck(req) {

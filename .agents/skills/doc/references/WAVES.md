@@ -33,6 +33,8 @@ Exit test on a fresh machine: finish setup, hand-write a reminder and delegate i
 
 ## Wave 2: tell it once
 
+Built on 2026-10-31: the once, always or no prompt, always-rules applied silently and listed in the approval, and the app managing learned records. Not built: grant scope allow-for-this-project, grant revocation, full-text search over past records and per task-type checklists.
+
 A decision made in one task is offered back in the next, with the three answers once, always, or no. Learned records are read by the gatherer and shown to the definer as priors with an applies-when condition. Always-rules apply silently and are listed in the approval message. The app manages learned records. Grant scope allow-for-this-project, grant revocation, full-text search over past records and per task-type checklists come here. Exit test: the same kind of task three times, asked, then always, then assumed and listed.
 
 ## Wave 3: trust and control

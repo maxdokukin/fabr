@@ -29,6 +29,8 @@ pub struct Learned {
     pub source_tasks: Vec<String>,
     #[serde(default)]
     pub last_confirmed: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub always: bool,
 }
 
 fn project() -> String {
@@ -61,6 +63,13 @@ pub struct KnowledgeWriteReq {
 pub struct LearnedForgetReq {
     pub folder: String,
     pub id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LearnedAlwaysReq {
+    pub folder: String,
+    pub id: String,
+    pub always: bool,
 }
 
 pub fn agents_dir(folder: &Path) -> PathBuf {
@@ -137,28 +146,61 @@ pub fn forget(folder: &Path, id: &str) -> Result<NodeKnowledge, FabrError> {
     read(folder)
 }
 
-pub fn capture(folder: &Path, record_path: &Path, rec: &TaskRecord, at: &str) -> Result<usize, FabrError> {
-    let answered: Vec<&Question> = rec.answers.iter().filter(|q| answer_text(q).is_some()).collect();
-    if answered.is_empty() {
+pub fn set_always(folder: &Path, id: &str, always: bool) -> Result<NodeKnowledge, FabrError> {
+    let mut records = read_learned(folder)?;
+    let Some(r) = records.iter_mut().find(|r| r.id == id) else {
+        return Err(FabrError::NotFound(format!("no learned record {id}")));
+    };
+    if r.always != always {
+        r.always = always;
+        write_learned(folder, records)?;
+    }
+    read(folder)
+}
+
+pub fn find(chain: &[PathBuf], pick: impl Fn(&Learned) -> bool) -> Option<(PathBuf, Learned)> {
+    chain.iter().find_map(|dir| read_learned(dir).unwrap_or_default().into_iter().find(|r| pick(r)).map(|r| (dir.clone(), r)))
+}
+
+pub fn capture(chain: &[PathBuf], record_path: &Path, rec: &TaskRecord, at: &str) -> Result<usize, FabrError> {
+    let Some(folder) = chain.first() else { return Ok(0) };
+    let source = record_path.to_string_lossy().to_string();
+    let mut found: Vec<(String, String)> = Vec::new();
+    for q in rec.answers.iter().filter(|q| q.kind == "choice") {
+        let (Some(prior), Some(a)) = (&q.prior, &q.answer) else { continue };
+        let hit = find(chain, |r| r.text == prior.text);
+        if a.value.as_deref() == Some("no") {
+            let text = one_line(a.replacement.as_deref().unwrap_or(""));
+            if !text.is_empty() && text.len() <= 400 {
+                found.push((hit.map_or_else(|| one_line(&q.text), |(_, r)| r.applies_when), text));
+            }
+            continue;
+        }
+        let Some((dir, r)) = hit else { continue };
+        if dir != *folder {
+            let mut others = read_learned(&dir)?;
+            if let Some(o) = others.iter_mut().find(|o| o.id == r.id) {
+                confirm(o, &source, at);
+                write_learned(&dir, others)?;
+            }
+        } else {
+            found.push((r.applies_when.clone(), r.text.clone()));
+        }
+    }
+    for q in rec.answers.iter().filter(|q| q.kind != "choice") {
+        let Some(text) = answer_text(q) else { continue };
+        if !text.to_ascii_lowercase().starts_with("allow") {
+            found.push((one_line(&q.text), text));
+        }
+    }
+    if found.is_empty() {
         return Ok(0);
     }
     let mut records = read_learned(folder)?;
-    let source = record_path.to_string_lossy().to_string();
     let mut added = 0;
-    for q in answered {
-        let Some(text) = answer_text(q) else { continue };
-        if text.to_ascii_lowercase().starts_with("allow") {
-            continue;
-        }
-        let applies_when = one_line(&q.text);
+    for (applies_when, text) in found {
         match records.iter_mut().find(|r| r.applies_when == applies_when && r.text == text) {
-            Some(r) => {
-                if !r.source_tasks.contains(&source) {
-                    r.count += 1;
-                    r.source_tasks.push(source.clone());
-                }
-                r.last_confirmed = Some(at.to_string());
-            }
+            Some(r) => confirm(r, &source, at),
             None => {
                 records.push(Learned {
                     id: next_id(&records),
@@ -168,6 +210,7 @@ pub fn capture(folder: &Path, record_path: &Path, rec: &TaskRecord, at: &str) ->
                     count: 1,
                     source_tasks: vec![source.clone()],
                     last_confirmed: Some(at.to_string()),
+                    always: false,
                 });
                 added += 1;
             }
@@ -178,6 +221,14 @@ pub fn capture(folder: &Path, record_path: &Path, rec: &TaskRecord, at: &str) ->
     }
     write_learned(folder, records)?;
     Ok(added)
+}
+
+fn confirm(r: &mut Learned, source: &str, at: &str) {
+    if !r.source_tasks.iter().any(|s| s == source) {
+        r.count += 1;
+        r.source_tasks.push(source.to_string());
+    }
+    r.last_confirmed = Some(at.to_string());
 }
 
 fn answer_text(q: &Question) -> Option<String> {
@@ -250,9 +301,10 @@ mod tests {
         let a = d.path().join("a.md");
         let b = d.path().join("b.md");
         let r = rec(vec![answered("q1", "Which shop?", "Prusa  store"), answered("q2", "Allow npm install?", "allow")]);
-        assert_eq!(capture(d.path(), &a, &r, "2026-10-31T01:00:00Z").unwrap(), 1);
-        assert_eq!(capture(d.path(), &a, &r, "2026-10-31T01:05:00Z").unwrap(), 0);
-        assert_eq!(capture(d.path(), &b, &r, "2026-10-31T02:00:00Z").unwrap(), 0);
+        let c = [d.path().to_path_buf()];
+        assert_eq!(capture(&c, &a, &r, "2026-10-31T01:00:00Z").unwrap(), 1);
+        assert_eq!(capture(&c, &a, &r, "2026-10-31T01:05:00Z").unwrap(), 0);
+        assert_eq!(capture(&c, &b, &r, "2026-10-31T02:00:00Z").unwrap(), 0);
         let learned = read_learned(d.path()).unwrap();
         assert_eq!(learned.len(), 1);
         assert_eq!(
@@ -265,11 +317,48 @@ mod tests {
         assert!(matches!(forget(d.path(), "l1"), Err(FabrError::NotFound(_))));
     }
 
+    fn chose(value: &str, prior: &str, replacement: Option<&str>) -> Question {
+        let mut q = answered("q2", "Ship it home again?", value);
+        q.kind = "choice".into();
+        q.prior = Some(crate::taskrec::Prior { text: prior.into(), source_task: None, last_confirmed: None });
+        q.answer.as_mut().unwrap().replacement = replacement.map(String::from);
+        q
+    }
+
+    #[test]
+    fn set_always_round_trips_and_is_written_only_when_true() {
+        let d = tempfile::tempdir().unwrap();
+        let c = [d.path().to_path_buf()];
+        capture(&c, &d.path().join("a.md"), &rec(vec![answered("q1", "Which shop?", "Prusa")]), "2026-10-31T01:00:00Z").unwrap();
+        let path = d.path().join(".fabric-space/.agents/learned.yaml");
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("always"));
+        assert!(set_always(d.path(), "l1", true).unwrap().learned[0].always);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("always: true"));
+        assert!(!set_always(d.path(), "l1", false).unwrap().learned[0].always);
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("always"));
+        assert!(matches!(set_always(d.path(), "l9", true), Err(FabrError::NotFound(_))));
+    }
+
+    #[test]
+    fn choice_answers_confirm_the_prior_or_capture_the_replacement() {
+        let d = tempfile::tempdir().unwrap();
+        let c = [d.path().to_path_buf()];
+        capture(&c, &d.path().join("a.md"), &rec(vec![answered("q1", "Where to ship?", "Home")]), "2026-10-31T01:00:00Z").unwrap();
+        assert_eq!(capture(&c, &d.path().join("b.md"), &rec(vec![chose("once", "Home", None)]), "2026-10-31T02:00:00Z").unwrap(), 0);
+        let l = read_learned(d.path()).unwrap();
+        assert_eq!((l.len(), l[0].count, l[0].last_confirmed.as_deref()), (1, 2, Some("2026-10-31T02:00:00Z")));
+        let no = rec(vec![chose("no", "Home", Some("the  office")), chose("no", "Home", None)]);
+        assert_eq!(capture(&c, &d.path().join("c.md"), &no, "2026-10-31T03:00:00Z").unwrap(), 1);
+        let l = read_learned(d.path()).unwrap();
+        assert_eq!((l[1].id.as_str(), l[1].text.as_str(), l[1].applies_when.as_str()), ("l2", "the office", "Where to ship?"));
+        assert_eq!(l.len(), 2);
+    }
+
     #[test]
     fn the_sample_learned_file_parses() {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../sample-fabr-space/home");
         let learned = read_learned(&dir).unwrap();
-        assert_eq!((learned[0].id.as_str(), learned[0].scope.as_str()), ("g1", "global"));
+        assert_eq!((learned[0].id.as_str(), learned[0].scope.as_str(), learned[0].always), ("g1", "global", false));
     }
 
     #[test]

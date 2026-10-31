@@ -10,9 +10,10 @@ use crate::state::{append_log, clean_message, is_terminal, pending_tail, questio
 use crate::store::mutate;
 use crate::verify;
 use fabr_core::FabrError;
+use fabr_core::knowledge::{self, Learned};
 use fabr_core::taskrec::{
-    Approval, Assertion, Author, Check, PlanMeta, Question, RedoStage, Sessions, State, Step, TaskRecord, Verdict, VerdictItem,
-    approval_digest, registry_filename,
+    Approval, Assertion, Assumption, Author, Check, PlanMeta, Prior, Question, RedoStage, Sessions, State, Step, TaskRecord, Verdict,
+    VerdictItem, approval_digest, registry_filename,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -480,7 +481,11 @@ fn settle<T>(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, slot: Slot, s
 fn auto_approvable(ctl: &Ctl, rec: &TaskRecord) -> bool {
     ctl.harness.auto_mode
         && rec.needs.is_none()
-        && rec.plan_meta.as_ref().is_some_and(|m| m.reversibility.as_deref() != Some("irreversible") && validate_plan(m).is_ok())
+        && rec.plan_meta.as_ref().is_some_and(|m| {
+            m.reversibility.as_deref() != Some("irreversible")
+                && validate_plan(m).is_ok()
+                && m.tools.iter().all(|t| crate::caps::auto_safe(t))
+        })
 }
 
 fn harness_gate(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, label: &str) -> Result<bool, FabrError> {
@@ -530,10 +535,11 @@ pub fn apply_redo(rec: &mut TaskRecord, stage: RedoStage) {
             append_log(&mut rec.log, "redo", "plan by user");
         }
     }
+    let assumed = rec.plan_meta.take().map(|m| m.assumptions).filter(|a| !a.is_empty() && stage == RedoStage::Plan);
     rec.state = State::Task;
     rec.plan.clear();
     rec.by.plan = None;
-    rec.plan_meta = None;
+    rec.plan_meta = assumed.map(|assumptions| PlanMeta { assumptions, ..Default::default() });
     rec.approval = None;
     rec.needs = None;
 }
@@ -541,7 +547,7 @@ pub fn apply_redo(rec: &mut TaskRecord, stage: RedoStage) {
 fn tail_step(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord) -> Result<(), FabrError> {
     if rec.step == Some(Step::Learn) {
         rec.step = Some(Step::Notify);
-        let msg = match fabr_core::knowledge::capture(cx.node_dir, cx.record_path, rec, &now_utc()) {
+        let msg = match knowledge::capture(&folder_chain(cx.node_dir, cx.ctl.root.as_deref()), cx.record_path, rec, &now_utc()) {
             Ok(0) => "nothing new".to_string(),
             Ok(n) => format!("captured {n} answer{}", if n == 1 { "" } else { "s" }),
             Err(e) => format!("capture failed: {}", clean_message(&e.message(), 160)),
@@ -646,9 +652,10 @@ pub fn gather_bundle(node_dir: &Path, root: Option<&Path>) -> String {
     }
     let mut learned = String::new();
     for (i, dir) in chain.iter().enumerate() {
-        for r in fabr_core::knowledge::read_learned(dir).unwrap_or_default() {
+        for r in knowledge::read_learned(dir).unwrap_or_default() {
             let when = if r.applies_when.is_empty() { String::new() } else { format!("when {}: ", demote(&r.applies_when, 5)) };
-            let line = format!("- {when}{} (learned in {}, confirmed {}x)\n", demote(&r.text, 5), label(dir, i), r.count);
+            let always = if r.always { " (always)" } else { "" };
+            let line = format!("- {}{always}: {when}{} (learned in {}, confirmed {}x)\n", r.id, demote(&r.text, 5), label(dir, i), r.count);
             if used + line.len() > GATHER_TOTAL_CAP {
                 cut = true;
                 continue;
@@ -710,6 +717,9 @@ pub fn answers_text(rec: &TaskRecord) -> String {
     for q in answered {
         out.push_str(&format!("\n\nAlready asked: {}\nUser answered: {}", q.text, reply_text(q)));
     }
+    for a in rec.plan_meta.iter().flat_map(|m| &m.assumptions) {
+        out.push_str(&format!("\n\nAlways-rule {} applies, the user chose Always: {}", a.rule_id, a.text));
+    }
     out
 }
 
@@ -768,6 +778,57 @@ fn ask(rec: &mut TaskRecord, label: &str, text: String) {
     append_log(&mut rec.log, label, &format!("asked {id}"));
 }
 
+fn ask_prior(rec: &mut TaskRecord, text: Option<String>, r: &Learned) {
+    let id = next_question_id(rec);
+    rec.question = Some(Question {
+        id: id.clone(),
+        kind: "choice".into(),
+        text: text.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).unwrap_or_else(|| "Same as last time?".into()),
+        options: Some(["once", "always", "no"].map(String::from).to_vec()),
+        prior: Some(Prior { text: r.text.clone(), source_task: r.source_tasks.first().cloned(), last_confirmed: r.last_confirmed.clone() }),
+        fields: None,
+        asked_at: Some(now_utc()),
+        answer: None,
+    });
+    rec.waiting = true;
+    append_log(&mut rec.log, "define", &format!("asked {id} about {}", r.id));
+}
+
+fn assume(rec: &mut TaskRecord, r: &Learned) {
+    let meta = rec.plan_meta.get_or_insert_with(PlanMeta::default);
+    if !meta.assumptions.iter().any(|a| a.rule_id == r.id && a.text == r.text) {
+        meta.assumptions.push(Assumption { rule_id: r.id.clone(), text: r.text.clone() });
+    }
+}
+
+fn prior_asked(rec: &TaskRecord, r: &Learned) -> bool {
+    rec.answers.iter().any(|q| q.kind == "choice" && q.prior.as_ref().is_some_and(|p| p.text == r.text))
+}
+
+fn always_chosen(cx: &Cx, rec: &mut TaskRecord) {
+    let chosen: Vec<(String, String)> = rec
+        .answers
+        .iter()
+        .filter(|q| q.kind == "choice" && q.answer.as_ref().is_some_and(|a| a.value.as_deref() == Some("always")))
+        .filter_map(|q| Some((q.id.clone(), q.prior.as_ref()?.text.clone())))
+        .collect();
+    if chosen.is_empty() {
+        return;
+    }
+    let chain = folder_chain(cx.node_dir, cx.ctl.root.as_deref());
+    for (qid, text) in chosen {
+        let Some((dir, r)) = knowledge::find(&chain, |r| r.text == text) else { continue };
+        let note = format!("{qid} set {} to always", r.id);
+        if !r.always && !rec.log.contains(&note) {
+            match knowledge::set_always(&dir, &r.id, true) {
+                Ok(_) => append_log(&mut rec.log, "define", &note),
+                Err(e) => log::warn!("could not set {} to always: {}", r.id, e.message()),
+            }
+        }
+        assume(rec, &r);
+    }
+}
+
 fn fold_question(rec: &mut TaskRecord) {
     if rec.question.as_ref().is_some_and(|q| q.answer.is_some())
         && let Some(q) = rec.question.take()
@@ -782,6 +843,7 @@ fn define_stage(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, engine: &i
         return Ok(());
     }
     fold_question(rec);
+    always_chosen(cx, rec);
     let spec_human = rec.by.spec == Some(Author::Human);
     let success_human = rec.by.success == Some(Author::Human);
     if spec_human && success_human && !rec.assertions.is_empty() {
@@ -801,6 +863,26 @@ fn define_stage(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, engine: &i
     let input = DefineInput { cwd: cx.node_dir, resume: resume.as_deref(), title: &title, context: &context, answers: &answers };
     let run = engine.define(&input, &mut Live { cx, rec, base, slot: Slot::Plan, label: "define", log_tools: false });
     let Some(draft) = settle(cx, rec, base, Slot::Plan, "define", run)? else { return Ok(()) };
+    let cited = draft
+        .prior_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .and_then(|id| knowledge::find(&folder_chain(cx.node_dir, cx.ctl.root.as_deref()), |r| r.id == id).map(|(_, r)| r));
+    match cited {
+        Some(r) if r.always => {
+            assume(rec, &r);
+            append_log(&mut rec.log, "define", &format!("assumed {} (always)", r.id));
+        }
+        Some(r) if !prior_asked(rec, &r) => {
+            rec.step = Some(Step::Define);
+            ask_prior(rec, draft.prior_question, &r);
+            persist(cx.record_path, rec, base)?;
+            cx.mark(rec, Activity::Parked);
+            return Ok(());
+        }
+        _ => {}
+    }
     if let Some(text) = draft.question.filter(|q| !q.trim().is_empty()) {
         rec.step = Some(Step::Define);
         ask(rec, "define", text);
@@ -924,6 +1006,7 @@ fn plan_stage(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, engine: &imp
         }
     };
     meta.requires = requires_of(&meta);
+    meta.assumptions = rec.plan_meta.as_ref().map(|m| m.assumptions.clone()).unwrap_or_default();
     let invalid = validate_plan(&meta).err();
     if let Some(draft) = draft
         && !human_plan

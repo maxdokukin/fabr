@@ -278,9 +278,9 @@
         {@render editor('plan')}
         {#if editing === 'plan'}{:else if s.plan}<div class="txt"><Prose text={s.plan} /></div>{:else}<p class="slot">Plan: written by the planner during plan</p>{/if}
         {#if pm}
-          <p class="dim">reversibility: <b class:warn={pm.reversibility === 'irreversible'}>{pm.reversibility}</b> · tools: {pm.tools.join(', ') || 'none'}</p>
-          {#if pm.assumptions.length}
-            <ul class="list">{#each pm.assumptions as a (a.rule_id)}<li>assumes <b>{a.rule_id}</b>: {a.text}</li>{/each}</ul>
+          {#if pm.reversibility}<p class="dim">reversibility: <b class:warn={pm.reversibility === 'irreversible'}>{pm.reversibility}</b> · tools: {pm.tools.join(', ') || 'none'}</p>{/if}
+          {#if pm.assumptions?.length}
+            <ul class="list">{#each pm.assumptions as a (a.rule_id + a.text)}<li>assumes <b>{a.rule_id}</b>: {a.text}</li>{/each}</ul>
           {/if}
         {/if}
       </div>

@@ -558,7 +558,9 @@ pub fn define_schema() -> Value {
             "spec": {"type": "string"},
             "success": {"type": "string"},
             "assertions": assertions_schema(),
-            "grants": {"type": "array", "items": {"type": "string"}}
+            "grants": {"type": "array", "items": {"type": "string"}},
+            "prior_id": {"type": ["string", "null"]},
+            "prior_question": {"type": ["string", "null"]}
         },
         "required": ["question", "spec", "success", "assertions"]
     })
@@ -609,6 +611,10 @@ const DEFINE_ASK: &str = "Return:\n\
 - success: how the user will know it is done (empty when you ask).\n\
 - assertions: 1 to 3 checkable statements about the finished result, ids a1, a2, a3, as few as the success definition needs. \
 Each one must be checkable from the files in this folder; no filler.\n\
+- prior_id: the id of one learned record (l1, g1, ...) that settles a decision this task needs, otherwise null. \
+A record marked (always) is applied: use it and define the task. For any other record leave spec empty and question null, \
+and set prior_question to a short question asking whether to do the same again; fabr asks the user. \
+Do not cite a record the user already answered about.\n\
 Read files in the folder when it helps.";
 
 pub fn define_prompt(input: &DefineInput) -> String {

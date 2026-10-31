@@ -4,7 +4,12 @@
   import Group from '../ui/Group.svelte';
   import Row from '../ui/Row.svelte';
 
-  let { k, onsave, onforget }: { k: NodeKnowledge; onsave: (kind: KnowledgeKind, text: string) => void; onforget: (id: string) => void } = $props();
+  let { k, onsave, onforget, onalways }: {
+    k: NodeKnowledge;
+    onsave: (kind: KnowledgeKind, text: string) => void;
+    onforget: (id: string) => void;
+    onalways: (id: string, always: boolean) => void;
+  } = $props();
 
   const FIELDS: { kind: KnowledgeKind; label: string; hint: string }[] = [
     { kind: 'rules', label: 'Rules', hint: 'How the agent must behave in this folder' },
@@ -28,7 +33,8 @@
 {#if k.learned.length}
   <Group header="Learned">
     {#each k.learned as l (l.id)}
-      <Row label={l.text} sub={[l.applies_when && `When ${l.applies_when}`, `x${l.count}`].filter(Boolean).join(' · ')} wrap>
+      <Row label={l.text} sub={[l.always && 'Always', l.applies_when && `When ${l.applies_when}`, `x${l.count}`].filter(Boolean).join(' · ')} wrap>
+        <Button variant="plain" data-testid="always-{l.id}" onclick={() => onalways(l.id, !l.always)}>{l.always ? 'Stop always' : 'Always'}</Button>
         <Button variant="plain" data-testid="forget-{l.id}" onclick={() => onforget(l.id)}>Forget</Button>
       </Row>
     {/each}

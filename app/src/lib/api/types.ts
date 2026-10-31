@@ -204,7 +204,7 @@ export interface TranscriptEntry { role: 'user' | 'assistant' | 'tool'; text: st
 export interface CcSendReq { folder: string; id: string; message: string }
 export interface CcSendRes { reply: string; cost_usd: number }
 export interface Transcript { id: string; title: string; entries: TranscriptEntry[]; truncated: boolean }
-export interface LearnedRecord { id: string; text: string; applies_when: string; scope: string; count: number; source_tasks: string[]; last_confirmed?: string | null }
+export interface LearnedRecord { id: string; text: string; applies_when: string; scope: string; count: number; source_tasks: string[]; last_confirmed?: string | null; always?: boolean }
 export type KnowledgeKind = 'rules' | 'knowledge';
 export interface NodeKnowledge { rules: string; knowledge: string; learned: LearnedRecord[] }
 export interface FabricAgentStatus { running: boolean; reason: string | null }

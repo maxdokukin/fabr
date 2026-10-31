@@ -31,6 +31,10 @@ pub struct DefineOut {
     pub assertions: Vec<DraftAssertion>,
     #[serde(default)]
     pub grants: Vec<String>,
+    #[serde(default)]
+    pub prior_id: Option<String>,
+    #[serde(default)]
+    pub prior_question: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]

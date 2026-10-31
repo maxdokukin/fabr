@@ -18,7 +18,7 @@ The agent backend (`crates/fabr-agent`), the core (`crates/fabr-core`) and the a
 | `<folder>/.fabric-space/tasks.lock` | flock target | any record writer | any record writer |
 | `<folder>/.fabr/meta.toml` | TOML | app, CLI | app, CLI |
 | `<folder>/.fabric-space/.agents/rules.md`, `knowledge.md` | markdown | app (node settings) | gatherer |
-| `<folder>/.fabric-space/.agents/learned.yaml` | YAML `records:` | learner; app may delete a record | gatherer, app |
+| `<folder>/.fabric-space/.agents/learned.yaml` | YAML `records:` with `id`, `text`, `applies_when`, `count`, `source_tasks`, `last_confirmed`, `always` | learner; define sets `always`; the app may delete a record or toggle `always` | gatherer, app |
 | `~/.claude/projects/<folder with every non-alphanumeric as ->/<session>.jsonl` | Claude Code's own store | Claude Code | app (`ccsession.rs`), read-only |
 
 `.fabr/` holds only `meta.toml` (node settings). A `.todo` file in it is a leftover that `fabr import` converts. Remote ssh nodes list their tasks read-only through the snapshot. Planned and not in code: `data-bank/` (vault, policy, audit log), `proposals.yaml`, `index.sqlite`.
@@ -56,7 +56,7 @@ YAML front matter, then five sections in this order: `## Context`, `## Spec`, `#
 
 `## Context` holds the user's text, and the gatherer appends a `### Gathered` subsection. `## Spec` and `## Plan` are written by the planner session; the plan has `### Inputs`, `### Outputs` and `### Steps`. `## Success` is the user's definition as given. `## Log` is append-only lines `- <timestamp> <step>: <message>` written by the backend; the app never writes it.
 
-The approval digest is a sha256 over the normalized Spec, Success and Plan bodies, the assertions, and `plan_meta` (reversibility, tools, checks). The recipe is `approval_digest` in `taskrec.rs`. It is not the JSON preimage that the first version of this file described.
+The approval digest is a sha256 over the normalized Spec, Success and Plan bodies, the assertions, and `plan_meta` (reversibility, tools, checks, and the assumptions when there are any). The recipe is `approval_digest` in `taskrec.rs`. It is not the JSON preimage that the first version of this file described.
 
 ## States and who moves them
 

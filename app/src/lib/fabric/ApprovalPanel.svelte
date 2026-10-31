@@ -48,6 +48,13 @@
     return [...groups];
   });
   const irreversible = $derived(planMeta?.reversibility === 'irreversible');
+  const BASE = ['Read', 'Glob', 'Grep'];
+  const ruleNote = (rule: string) => {
+    const name = rule.split('(')[0];
+    return name === 'Bash' ? 'runs commands' : name === 'WebFetch' || name === 'WebSearch' ? 'uses the network' : '';
+  };
+  const assumed = $derived(planMeta?.assumptions ?? []);
+  const rules = $derived((planMeta?.tools ?? []).filter((t) => !BASE.includes(t)).map((t) => ({ t, note: ruleNote(t) })));
   const describe = (g: { field: string; scope: Scope }) => `${g.field} (${g.scope})`;
 
   async function send(d: ApprovalDecision) {
@@ -113,22 +120,12 @@
         {:else}<p class="dim">No fields requested.</p>{/if}
       </section>
 
-      {#if planMeta}
-        <section>
-          <h4>Reversibility</h4>
-          {#if irreversible}
-            <p class="warn" role="alert" data-testid="irreversible">Irreversible: once this runs it cannot be undone.</p>
-          {:else}<p class="txt">reversible</p>{/if}
-          <p class="dim">tools: {planMeta.tools.join(', ') || 'none'}</p>
+      {#if assumed.length}
+        <section data-testid="assumed">
+          <h4>Assumed</h4>
+          <ul class="list">{#each assumed as a (a.rule_id + a.text)}<li>{a.text}</li>{/each}</ul>
+          <p class="dim">Applied because you chose Always.</p>
         </section>
-
-        {#if planMeta.assumptions.length}
-          <section>
-            <h4>Assumptions</h4>
-            <p class="dim">These always-rules were applied without asking.</p>
-            <ul class="list">{#each planMeta.assumptions as a (a.rule_id)}<li><b>{a.rule_id}</b>: {a.text}</li>{/each}</ul>
-          </section>
-        {/if}
       {/if}
 
       {#if planSession && folder}
@@ -139,6 +136,21 @@
             {#if onredo}<Button variant="tint" disabled={busy} data-testid="approval-redo-plan" onclick={onredo}>Redo plan</Button>{/if}
           </div>
           <p class="dim" data-testid="discuss-hint">{discussed ? `${discussed} ` : ''}{DISCUSS_HINT}</p>
+        </section>
+      {/if}
+
+      {#if planMeta}
+        <section data-testid="may-use">
+          <h4>Claude Code may use</h4>
+          <div class="chips">
+            {#each BASE as t (t)}<span class="chip muted">{t}</span>{/each}
+            {#each rules as r (r.t)}<span class="chip" class:hot={r.note}>{r.t}{#if r.note}<small>{r.note}</small>{/if}</span>{/each}
+          </div>
+          {#if planMeta.checks?.length}
+            <p class="dim">Checks after the run:</p>
+            <ul class="list mono">{#each planMeta.checks as c, i (i)}<li>{[c.cmd, ...c.args].join(' ')}</li>{/each}</ul>
+          {/if}
+          {#if irreversible}<p class="warn" role="alert" data-testid="irreversible">Irreversible: once this runs it cannot be undone.</p>{/if}
         </section>
       {/if}
 
@@ -184,4 +196,10 @@
   .head { font-weight: 600; margin-top: 4px; }
   .leaf { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; padding-left: 14px; }
   .name { overflow-wrap: anywhere; }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+  .chip { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--fs-12); padding: 2px 6px; border: 1px solid var(--sep); border-radius: var(--radius-ctl); overflow-wrap: anywhere; }
+  .chip.muted { color: var(--label-2); }
+  .chip.hot { border-color: var(--orange); }
+  .chip small { color: var(--orange); margin-left: 4px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--fs-12); }
 </style>

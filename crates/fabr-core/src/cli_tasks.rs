@@ -146,6 +146,9 @@ pub fn show(path: &Path) -> Result<String, FabrError> {
         for c in &m.checks {
             s.push_str(&format!("Check: {} {}\n", c.cmd, c.args.join(" ")));
         }
+        for a in &m.assumptions {
+            s.push_str(&format!("Assumed ({}, you chose always): {}\n", a.rule_id, a.text));
+        }
     }
     if !r.assertions.is_empty() {
         s.push_str("\nAssertions:\n");

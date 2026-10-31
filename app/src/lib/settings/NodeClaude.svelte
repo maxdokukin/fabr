@@ -46,6 +46,9 @@
   async function forget(id: string) {
     try { know = await (await createApi()).fabricLearnedForget(folder!, id); } catch (e) { fail(e); }
   }
+  async function always(id: string, on: boolean) {
+    try { know = await (await createApi()).fabricLearnedAlways(folder!, id, on); } catch (e) { fail(e); }
+  }
 </script>
 
 {#if folder}
@@ -61,7 +64,7 @@
       {/each}
       <Row label="New session here" tone="tint" onclick={() => report(openNewClaude(folder!))} />
     </Group>
-    {#if know}<KnowledgeGroup k={know} onsave={save} onforget={forget} />{/if}
+    {#if know}<KnowledgeGroup k={know} onsave={save} onforget={forget} onalways={always} />{/if}
   </section>
   {#if view}<TranscriptSheet {folder} id={view.id} title={view.title} onclose={() => (view = null)} />{/if}
 {/if}

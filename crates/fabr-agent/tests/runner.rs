@@ -928,3 +928,109 @@ fn start_kills_process_groups_left_by_a_dead_runner() {
     assert!(!file.exists());
     r.shutdown(true);
 }
+
+fn cites(id: &str, question: &str) -> serde_json::Value {
+    json!({"question": null, "spec": "", "success": "", "assertions": [], "prior_id": id, "prior_question": question})
+}
+
+fn defines_with(id: &str) -> serde_json::Value {
+    let mut v = define_out(None);
+    v["prior_id"] = json!(id);
+    v
+}
+
+fn reply(p: &Path, value: &str, replacement: Option<&str>) {
+    edit(p, |rec| {
+        rec.question.as_mut().unwrap().answer = Some(Answer {
+            value: Some(value.into()),
+            replacement: replacement.map(String::from),
+            granted: None,
+            by: Some("gui".into()),
+            at: Some("2026-10-31T10:00:00Z".into()),
+        });
+    });
+}
+
+#[test]
+fn a_prior_is_asked_then_always_then_assumed_and_a_replacement_is_learned() {
+    let e = ready();
+    let agents = e.proj.join(".fabric-space/.agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(
+        agents.join("learned.yaml"),
+        "records:\n  - {id: l1, text: Ship to home, applies_when: Where to ship?, source_tasks: [/p/old.md], last_confirmed: 2026-10-01T00:00:00Z}\n  - {id: l2, text: Use the blue box, applies_when: Which box?}\n",
+    )
+    .unwrap();
+    e.fake.push(ok(cites("l1", "Ship to home again?"), 0.01));
+    queue_plan(&e);
+    let (mut r, _) = runner(&e);
+    r.start().unwrap();
+
+    let first = new_record(&e, "order filament");
+    edit(&first, |rec| rec.requests.delegate = true);
+    r.tick();
+    let rec = load(&first);
+    assert!(e.fake.stdin(1).contains("- l1: when Where to ship?: Ship to home"), "{}", e.fake.stdin(1));
+    assert!(e.fake.flag(1, "--json-schema").unwrap().contains("prior_id"));
+    let q = rec.question.as_ref().unwrap();
+    assert_eq!((q.kind.as_str(), q.text.as_str(), rec.waiting), ("choice", "Ship to home again?", true));
+    assert_eq!(q.options.as_deref().unwrap(), ["once", "always", "no"]);
+    let prior = q.prior.as_ref().unwrap();
+    assert_eq!((prior.text.as_str(), prior.source_task.as_deref()), ("Ship to home", Some("/p/old.md")));
+    assert_eq!(prior.last_confirmed.as_deref(), Some("2026-10-01T00:00:00Z"));
+
+    reply(&first, "always", None);
+    r.tick();
+    let rec = load(&first);
+    assert_eq!((rec.state, rec.step), (State::Defined, Some(Step::Approve)), "{}", rec.log);
+    assert!(e.fake.stdin(2).contains("User answered: always (earlier choice: Ship to home)"), "{}", e.fake.stdin(2));
+    assert!(e.fake.stdin(3).contains("Always-rule l1 applies"), "{}", e.fake.stdin(3));
+    let learned = fabr_core::knowledge::read_learned(&e.proj).unwrap();
+    assert!(learned[0].always && !learned[1].always && rec.log.contains("define: q1 set l1 to always"), "{}", rec.log);
+    assert!(std::fs::read_to_string(agents.join("learned.yaml")).unwrap().contains("always: true"));
+    assert_eq!(rec.plan_meta.as_ref().unwrap().assumptions[0].rule_id, "l1");
+
+    e.fake.push(ok(defines_with("l1"), 0.01));
+    e.fake.push(ok(plan_out(&["Write"]), 0.02));
+    let second = new_record(&e, "order more filament");
+    edit(&second, |rec| rec.requests.delegate = true);
+    r.tick();
+    let rec = load(&second);
+    assert_eq!((rec.state, rec.step), (State::Defined, Some(Step::Approve)), "{}", rec.log);
+    assert!(e.fake.stdin(4).contains("- l1 (always): when Where to ship?: Ship to home"), "{}", e.fake.stdin(4));
+    assert!(rec.answers.is_empty() && rec.question.is_none() && rec.log.contains("define: assumed l1 (always)"), "{}", rec.log);
+    let meta = rec.plan_meta.clone().unwrap();
+    assert_eq!((meta.assumptions.len(), meta.assumptions[0].text.as_str()), (1, "Ship to home"));
+    let digest = rec.approval.as_ref().unwrap().digest.clone().unwrap();
+    assert_eq!(digest, taskrec::approval_digest(&rec));
+    let mut bare = rec.clone();
+    bare.plan_meta.as_mut().unwrap().assumptions.clear();
+    assert_ne!(digest, taskrec::approval_digest(&bare));
+
+    e.fake.push(ok(cites("l2", "Blue box again?"), 0.01));
+    queue_plan(&e);
+    e.fake.push(vec![
+        common::init(),
+        "@SH printf hi > greet.md".into(),
+        common::result(exec_out("done", "wrote greet.md"), 0.01, json!([])),
+    ]);
+    e.fake.push(ok(verdict_out(true), 0.005));
+    let third = new_record(&e, "pack the order");
+    edit(&third, |rec| rec.requests.delegate = true);
+    r.tick();
+    assert_eq!(load(&third).question.as_ref().unwrap().kind, "choice");
+    reply(&third, "no", Some("the red box"));
+    r.tick();
+    assert!(e.fake.stdin(7).contains("no; use instead: the red box"), "{}", e.fake.stdin(7));
+    approve(&third);
+    r.tick();
+    let rec = load(&third);
+    assert_eq!((rec.state, rec.step), (State::Succeeded, None), "{}", rec.log);
+    assert!(rec.plan_meta.as_ref().unwrap().assumptions.is_empty());
+    assert!(rec.log.contains("learn: captured 1 answer"), "{}", rec.log);
+    let learned = fabr_core::knowledge::read_learned(&e.proj).unwrap();
+    let added = learned.last().unwrap();
+    assert_eq!((added.text.as_str(), added.applies_when.as_str(), added.always), ("the red box", "Which box?", false));
+    assert_eq!(learned.len(), 3);
+    r.shutdown(true);
+}
