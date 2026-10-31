@@ -408,6 +408,11 @@ fn an_error_result_or_missing_structured_output_is_a_stage_error() {
         json!({"type": "result", "subtype": "success", "is_error": false, "session_id": "@SID@", "total_cost_usd": 0.25, "result": "hi"})
             .to_string(),
     ]);
+    e.fake.push(vec![
+        common::init(),
+        json!({"type": "result", "subtype": "success", "is_error": false, "session_id": "@SID@", "total_cost_usd": 0.1, "result": "still prose"})
+            .to_string(),
+    ]);
     let path = new_record(&e, "errors");
     edit(&path, |r| r.requests.delegate = true);
     let (r, _) = runner(&e);
@@ -418,8 +423,10 @@ fn an_error_result_or_missing_structured_output_is_a_stage_error() {
     assert!(rec.log.contains("define: error 1: Claude Code reported error_max_turns"), "{}", rec.log);
     r.tick();
     let rec = load(&path);
-    assert!(rec.log.contains("define: error 2: Claude Code returned no structured output"), "{}", rec.log);
-    assert!((rec.cost_usd - 0.75).abs() < 1e-9, "{}", rec.cost_usd);
+    assert!(rec.log.contains("define: error 2: Claude Code returned no structured output: still prose"), "{}", rec.log);
+    assert!(e.fake.stdin(3).contains("calling the StructuredOutput tool"), "{}", e.fake.stdin(3));
+    assert_eq!(e.fake.flag(3, "--resume"), rec.sessions.plan.clone());
+    assert!((rec.cost_usd - 0.85).abs() < 1e-9, "{}", rec.cost_usd);
     assert_eq!(e.fake.flag(2, "--resume"), rec.sessions.plan);
     r.shutdown(true);
 }

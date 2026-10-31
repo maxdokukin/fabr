@@ -405,7 +405,7 @@ fn settle<T>(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, slot: Slot, s
         *slot_mut(&mut rec.sessions, slot) = Some(id.clone());
     }
     if run.cost_usd > 0.0 {
-        rec.cost_usd += run.cost_usd;
+        rec.cost_usd = ((rec.cost_usd + run.cost_usd) * 1e6).round() / 1e6;
     }
     cx.ctl.board.spent(&rec.id, step, run.session_id.as_deref(), &run.usage, run.cost_usd);
     match run.end {

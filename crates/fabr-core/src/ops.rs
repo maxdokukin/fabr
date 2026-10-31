@@ -113,8 +113,8 @@ ops! {
     open_url Post false (OpenUrlReq) |_, r| Ok(Done::Desktop(Desktop::OpenUrl(r)));
     fabric_open_session Post false (OpenSessionReq) |_, r| Ok(Done::Desktop(Desktop::OpenSession(r)));
     fabric_open_claude Post false (OpenClaudeReq) |_, r| Ok(Done::Desktop(Desktop::OpenClaude(r)));
-    fabric_cc_sessions Post true (SessionsReq) |_, r| json(ccsession::list(&ccsession::config_dir(&Ctx::from_env().home), &local_dir(&r.folder)?)?);
-    fabric_cc_transcript Post true (TranscriptReq) |_, r| json(ccsession::transcript(&ccsession::config_dir(&Ctx::from_env().home), &local_dir(&r.folder)?, &r.id, r.limit.unwrap_or(300))?);
+    fabric_cc_sessions Post true (SessionsReq) |_, r| json(ccsession::list(&ccsession::config_dir(), &local_dir(&r.folder)?)?);
+    fabric_cc_transcript Post true (TranscriptReq) |_, r| json(ccsession::transcript(&ccsession::config_dir(), &local_dir(&r.folder)?, &r.id, r.limit.unwrap_or(300))?);
     fabric_knowledge_read Post true (KnowledgeReadReq) |_, r| json(knowledge::read(&local_dir(&r.folder)?)?);
     fabric_knowledge_write Post true (KnowledgeWriteReq) |_, r| json(knowledge::write(&local_dir(&r.folder)?, &r.kind, &r.text)?);
     fabric_learned_forget Post true (LearnedForgetReq) |_, r| json(knowledge::forget(&local_dir(&r.folder)?, &r.id)?);

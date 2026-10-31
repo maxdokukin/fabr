@@ -1,7 +1,7 @@
 use crate::caps::{on_path, runnable};
 use crate::engine::{
-    DefineInput, DefineOut, Denial, End, Engine, EvaluateInput, EvaluateOut, ExecuteInput, ExecuteOut, PlanInput, PlanOut, Run, ToolUse,
-    Usage, Watch,
+    DefineInput, DefineOut, Denial, End, Engine, EvaluateInput, EvaluateOut, ExecStatus, ExecuteInput, ExecuteOut, PlanInput, PlanOut, Run,
+    ToolUse, Usage, Watch,
 };
 use fabr_core::FabrError;
 use fabr_core::taskrec::Assertion;
@@ -70,6 +70,17 @@ pub struct Call<'a> {
     pub prompt: String,
     pub schema: Value,
     pub allowed: Vec<String>,
+    pub name: String,
+}
+
+pub fn session_name(role: Role, title: &str) -> String {
+    let word = match role {
+        Role::Planner => "plan",
+        Role::Executor { .. } => "execute",
+        Role::Validator => "validate",
+    };
+    let title: String = title.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(60).collect();
+    format!("fabr {word}: {title}")
 }
 
 pub fn resolve_bin(configured: &str) -> Option<PathBuf> {
@@ -120,6 +131,9 @@ pub fn args(engine: &ClaudeEngine, call: &Call, session: &str) -> Vec<String> {
     }
     if !engine.effort.is_empty() {
         out.extend(["--effort".into(), engine.effort.clone()]);
+    }
+    if !call.name.is_empty() {
+        out.extend(["--name".into(), call.name.clone()]);
     }
     out.extend(["--append-system-prompt".into(), system.into()]);
     out
@@ -283,13 +297,51 @@ fn finish<T: DeserializeOwned>(code: Option<i32>, result: Option<Value>, err_tai
     if let Some(c) = code.filter(|c| *c != 0) {
         return End::Failed(FabrError::Remote(format!("Claude Code exited with {c}: {err_tail}")));
     }
-    match r.get("structured_output").filter(|v| !v.is_null()) {
-        None => End::Failed(FabrError::Remote("Claude Code returned no structured output".into())),
-        Some(v) => match serde_json::from_value::<T>(v.clone()) {
+    match r.get("structured_output").filter(|v| !v.is_null()).cloned().or_else(|| json_in(r["result"].as_str().unwrap_or(""))) {
+        None => End::Failed(FabrError::Unprocessable(format!("{NO_STRUCTURED}: {}", r["result"].as_str().unwrap_or("").trim()))),
+        Some(v) => match serde_json::from_value::<T>(v) {
             Ok(out) => End::Done(out),
             Err(e) => End::Failed(FabrError::Remote(format!("Claude Code structured output did not match: {e}"))),
         },
     }
+}
+
+const NO_STRUCTURED: &str = "Claude Code returned no structured output";
+const NUDGE: &str = "Your work for this step is finished. Return the final result now by calling the StructuredOutput tool with the required fields. Do nothing else.";
+
+fn json_in(text: &str) -> Option<Value> {
+    let (start, end) = (text.find('{')?, text.rfind('}')?);
+    (start < end).then(|| serde_json::from_str::<Value>(&text[start..=end]).ok()).flatten().filter(Value::is_object)
+}
+
+pub fn missing_text<T>(run: &Run<T>) -> Option<String> {
+    match &run.end {
+        End::Failed(FabrError::Unprocessable(m)) => m.strip_prefix(NO_STRUCTURED).map(|t| t.trim_start_matches(':').trim().to_string()),
+        _ => None,
+    }
+}
+
+pub fn strict<T: DeserializeOwned>(engine: &ClaudeEngine, call: &Call, watch: &mut dyn Watch) -> Run<T> {
+    let first = session::<T>(engine, call, watch);
+    let (Some(_), Some(id)) = (missing_text(&first), first.session_id.clone()) else { return first };
+    let nudge = Call {
+        role: call.role,
+        cwd: call.cwd,
+        resume: Some(&id),
+        prompt: NUDGE.into(),
+        schema: call.schema.clone(),
+        allowed: call.allowed.clone(),
+        name: call.name.clone(),
+    };
+    let mut second = session::<T>(engine, &nudge, watch);
+    second.cost_usd += first.cost_usd;
+    second.usage.turns += first.usage.turns;
+    second.usage.input_tokens += first.usage.input_tokens;
+    second.usage.output_tokens += first.usage.output_tokens;
+    if second.session_id.is_none() {
+        second.session_id = Some(id);
+    }
+    second
 }
 
 static LIVE: Mutex<Vec<u32>> = Mutex::new(Vec::new());
@@ -547,8 +599,9 @@ impl Engine for ClaudeEngine {
             prompt: define_prompt(input),
             schema: define_schema(),
             allowed: vec![],
+            name: session_name(Role::Planner, input.title),
         };
-        session(self, &call, watch)
+        strict(self, &call, watch)
     }
 
     fn plan(&self, input: &PlanInput, watch: &mut dyn Watch) -> Run<PlanOut> {
@@ -559,8 +612,9 @@ impl Engine for ClaudeEngine {
             prompt: plan_prompt(input),
             schema: plan_schema(),
             allowed: vec![],
+            name: session_name(Role::Planner, input.title),
         };
-        session(self, &call, watch)
+        strict(self, &call, watch)
     }
 
     fn execute(&self, input: &ExecuteInput, watch: &mut dyn Watch) -> Run<ExecuteOut> {
@@ -576,8 +630,14 @@ impl Engine for ClaudeEngine {
             prompt: execute_prompt(input),
             schema: execute_schema(),
             allowed,
+            name: session_name(Role::Executor { read_only: input.read_only }, input.title),
         };
-        session(self, &call, watch)
+        let mut run = strict::<ExecuteOut>(self, &call, watch);
+        if let Some(text) = missing_text(&run).filter(|_| run.denials.is_empty()) {
+            let summary = if text.is_empty() { "finished without a summary".to_string() } else { text.chars().take(2000).collect() };
+            run.end = End::Done(ExecuteOut { status: ExecStatus::Done, summary, question: None });
+        }
+        run
     }
 
     fn evaluate(&self, input: &EvaluateInput, watch: &mut dyn Watch) -> Run<EvaluateOut> {
@@ -588,8 +648,9 @@ impl Engine for ClaudeEngine {
             prompt: evaluate_prompt(input),
             schema: evaluate_schema(),
             allowed: vec![],
+            name: session_name(Role::Validator, input.title),
         };
-        session(self, &call, watch)
+        strict(self, &call, watch)
     }
 }
 
@@ -717,7 +778,15 @@ mod tests {
     fn the_flags_follow_the_role() {
         let e = ClaudeEngine::new("claude").with_model("haiku", "low");
         let cwd = Path::new("/tmp");
-        let call = |role, resume, allowed: Vec<String>| Call { role, cwd, resume, prompt: String::new(), schema: json!({}), allowed };
+        let call = |role, resume, allowed: Vec<String>| Call {
+            role,
+            cwd,
+            resume,
+            prompt: String::new(),
+            schema: json!({}),
+            allowed,
+            name: String::new(),
+        };
         let planner = args(&e, &call(Role::Planner, None, vec![]), "sid");
         let joined = planner.join(" ");
         for part in [

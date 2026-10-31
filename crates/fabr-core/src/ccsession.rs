@@ -47,10 +47,10 @@ pub struct TranscriptReq {
     pub limit: Option<usize>,
 }
 
-pub fn config_dir(home: &Path) -> PathBuf {
+pub fn config_dir() -> PathBuf {
     match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()) {
         Some(dir) => PathBuf::from(dir),
-        None => home.join(".claude"),
+        None => directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf()).unwrap_or_else(|| PathBuf::from(".")).join(".claude"),
     }
 }
 
@@ -124,12 +124,14 @@ struct Scan {
 }
 
 fn scan_lines(text: &str) -> Scan {
+    let mut custom = None;
     let mut ai_title = None;
     let mut first_prompt = None;
     let mut messages = 0;
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         match v.get("type").and_then(Value::as_str) {
+            Some("custom-title") => custom = v.get("customTitle").and_then(Value::as_str).map(str::to_string).or(custom),
             Some("ai-title") => ai_title = v.get("aiTitle").and_then(Value::as_str).map(str::to_string).or(ai_title),
             Some("summary") if ai_title.is_none() => ai_title = v.get("summary").and_then(Value::as_str).map(str::to_string),
             Some("user") | Some("assistant") if !sidechain(&v) => {
@@ -141,7 +143,7 @@ fn scan_lines(text: &str) -> Scan {
             _ => {}
         }
     }
-    let title = ai_title.or(first_prompt).map(|t| clip(t.lines().next().unwrap_or("").trim(), TITLE_CHARS)).unwrap_or_default();
+    let title = custom.or(ai_title).or(first_prompt).map(|t| clip(t.lines().next().unwrap_or("").trim(), TITLE_CHARS)).unwrap_or_default();
     Scan { title, messages }
 }
 
@@ -190,6 +192,7 @@ fn entries_of(v: &Value) -> Vec<TranscriptEntry> {
                         Some("text") => {
                             b["text"].as_str().filter(|t| !t.trim().is_empty()).map(|t| entry("assistant", clip(t, TEXT_CHARS), None))
                         }
+                        Some("tool_use") if b["name"] == "StructuredOutput" => None,
                         Some("tool_use") => {
                             let name = b["name"].as_str().unwrap_or("tool").to_string();
                             Some(entry("tool", tool_summary(&name, &b["input"]), Some(name)))
@@ -250,7 +253,7 @@ mod tests {
             r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"x"},{"type":"text","text":"Looking."},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls -la\nscans"}}]}}"#.into(),
             r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"denied"}]}}"#.into(),
             r#"{"type":"assistant","isSidechain":true,"message":{"role":"assistant","content":[{"type":"text","text":"hidden"}]}}"#.into(),
-            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"/x/a.md"}},{"type":"text","text":"Done."}]}}"#.into(),
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"/x/a.md"}},{"type":"tool_use","id":"t3","name":"StructuredOutput","input":{}},{"type":"text","text":"Done."}]}}"#.into(),
             "not json".into(),
         ];
         std::fs::write(dir.join(format!("{ID}.jsonl")), lines.join("\n")).unwrap();
@@ -299,6 +302,8 @@ mod tests {
     fn an_ai_title_wins_over_the_first_prompt() {
         let text = format!("{}\n{}", r#"{"type":"user","message":{"content":"first"}}"#, r#"{"type":"ai-title","aiTitle":"Fix the CI"}"#);
         assert_eq!(scan_lines(&text).title, "Fix the CI");
+        let named = format!("{text}\n{}", r#"{"type":"custom-title","customTitle":"fabr plan: x"}"#);
+        assert_eq!(scan_lines(&named).title, "fabr plan: x");
         assert_eq!(clip("abcdef", 4), "abc…");
     }
 }

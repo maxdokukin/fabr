@@ -10,7 +10,15 @@ struct Quiet;
 impl Watch for Quiet {}
 
 fn call(cwd: &std::path::Path) -> Call<'_> {
-    Call { role: Role::Validator, cwd, resume: None, prompt: "x".into(), schema: json!({"type": "object"}), allowed: vec![] }
+    Call {
+        role: Role::Validator,
+        cwd,
+        resume: None,
+        prompt: "x".into(),
+        schema: json!({"type": "object"}),
+        allowed: vec![],
+        name: String::new(),
+    }
 }
 
 #[test]
