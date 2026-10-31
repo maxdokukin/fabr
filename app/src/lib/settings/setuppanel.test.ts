@@ -2,8 +2,6 @@ import { describe, expect, it } from 'vitest';
 import { StubSetupSource, emptySettings } from '../setup/setup-source';
 import { SetupPanel } from './setuppanel.svelte';
 
-const FAKE_SECRET = 'sk-ant-FAKE-FIXTURE-0000-0000';
-
 async function panel(opts: ConstructorParameters<typeof StubSetupSource>[0] = {}) {
   const src = new StubSetupSource(opts);
   const p = new SetupPanel(async () => src);
@@ -12,26 +10,28 @@ async function panel(opts: ConstructorParameters<typeof StubSetupSource>[0] = {}
 }
 
 describe('setup panel', () => {
-  it('shows only a fingerprint after saving the API credential and tests it', async () => {
+  it('checks Claude Code and reports version and path', async () => {
     const { p } = await panel();
-    expect(p.keySaved).toBe(false);
-    expect(await p.saveSecret('anthropic_api_key', FAKE_SECRET)).toBe(true);
-    expect(p.keyFingerprint).toBe('sk-ant-…0000');
-    expect(JSON.stringify(p.secrets)).not.toContain('FIXTURE');
-    await p.testKey();
-    expect(p.results.key?.ok).toBe(true);
+    expect(p.claudeReady).toBe(false);
+    await p.testClaude('');
+    expect(p.results.claude).toEqual({ ok: true, text: '2.1.287 (Claude Code) at /usr/local/bin/claude' });
   });
 
-  it('reports a failed check', async () => {
-    const { p } = await panel({ outcomes: { api_key: { ok: false, reason: 'Scripted failure.' } } });
-    await p.saveSecret('anthropic_api_key', FAKE_SECRET);
-    await p.testKey();
-    expect(p.results.key).toEqual({ ok: false, text: 'Scripted failure.' });
+  it('reports a failed Claude Code check', async () => {
+    const { p } = await panel({ outcomes: { claude: { ok: false, reason: 'Claude Code is not installed.' } } });
+    await p.testClaude('');
+    expect(p.results.claude).toEqual({ ok: false, text: 'Claude Code is not installed.' });
+  });
+
+  it('keeps the model, effort and program in settings', async () => {
+    const { src, p } = await panel();
+    expect(await p.write({ model: 'opus', effort: 'high', claude_bin: '/opt/claude' })).toBe(true);
+    expect(src.settings).toMatchObject({ model: 'opus', effort: 'high', claude_bin: '/opt/claude' });
   });
 
   it('links, then unlinks the telegram user', async () => {
     const { src, p } = await panel();
-    await p.saveSecret('telegram_bot_token', '123456:FAKE-FIXTURE-TOKEN-0000');
+    await p.saveSecret('123456:FAKE-FIXTURE-TOKEN-0000');
     await p.link();
     expect(p.linkedId).toBe(123456789);
     expect(src.settings.telegram_user_id).toBe(123456789);
@@ -64,9 +64,9 @@ describe('machine settings', () => {
 
   it('renders the three modes and the capability chips', async () => {
     const { render } = await import('svelte/server');
-    const ApiPage = (await import('./ApiPage.svelte')).default;
+    const ClaudePage = (await import('./ClaudePage.svelte')).default;
     const { p } = await panel({ settings: { ...emptySettings(), capabilities: { tools: ['write_file'], checks: ['git'] } } });
-    const body = render(ApiPage, { props: { ctl: { setup: p } as never } }).body;
-    for (const t of ['Full', 'Read-only', 'Off', 'write_file', 'git', 'refreshes them when it starts']) expect(body).toContain(t);
+    const body = render(ClaudePage, { props: { ctl: { setup: p } as never } }).body;
+    for (const t of ['Claude Code', 'Effort', 'Full', 'Read-only', 'Off', 'write_file', 'git', 'refreshes them when it starts']) expect(body).toContain(t);
   });
 });

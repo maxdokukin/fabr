@@ -14,11 +14,12 @@
   import { editStart, isEditable, provenance, REDO_LABEL, REDO_PENDING, type FieldsEdit, type Section } from './sections';
   import { canShelve, isOpen, phaseOf } from './phase';
   import { suspendLabel } from './stage';
+  import SessionsBlock from './SessionsBlock.svelte';
   import StateRibbon from './StateRibbon.svelte';
   import { minuteOf } from '../model';
   import type { TaskRecord } from './types';
 
-  let { record, name, backLabel = 'Records', agent, onback, onanswer, onapprove, onrequest, onedit, onfields, onsuspend, onunsuspend, now = new Date(), onreload, readonly = false }: {
+  let { record, name, backLabel = 'Records', agent, onback, onanswer, onapprove, onrequest, onedit, onfields, onsuspend, onunsuspend, now = new Date(), onreload, readonly = false, folder }: {
     record: TaskRecord;
     name: string;
     backLabel?: string;
@@ -34,6 +35,7 @@
     now?: Date | string;
     onreload?: () => Promise<void> | void;
     readonly?: boolean;
+    folder?: string;
   } = $props();
 
   const labels: Record<RequestKey, string> = { delegate: 'Delegate', cancel: 'Cancel', redelegate: 'Re-delegate', pause: 'Pause', resume: 'Resume', complete: 'Mark done', redo_define: REDO_LABEL.define, redo_plan: REDO_LABEL.plan };
@@ -296,6 +298,8 @@
         <div class="blk"><p class="slot">Approval: requested by the backend after plan</p></div>
       </Group>
     {/if}
+
+    {#if folder}<SessionsBlock sessions={record.sessions} {folder} />{/if}
 
     <Group header="Log">
       <div class="blk">

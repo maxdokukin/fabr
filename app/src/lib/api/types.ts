@@ -189,16 +189,18 @@ export interface Capabilities { tools: string[]; checks: string[] }
 export interface FabricSettings {
   default_folder: string; model: string; telegram_user_id: number | null; auto_mode: boolean;
   question_budget: number; heartbeat_interval_s: number; execute: ExecuteMode; capabilities: Capabilities; setup: SetupState;
+  claude_bin: string; effort: string;
 }
 export interface FabricSettingsRead { exists: boolean; settings: FabricSettings }
-export interface FabricSecretsWriteReq { anthropic_api_key?: string; telegram_bot_token?: string }
+export interface FabricSecretsWriteReq { telegram_bot_token?: string }
 export interface FabricSecretsStatus {
-  anthropic_api_key: boolean; telegram_bot_token: boolean;
-  anthropic_api_key_fingerprint?: string | null; telegram_bot_token_fingerprint?: string | null;
+  telegram_bot_token: boolean;
+  telegram_bot_token_fingerprint?: string | null;
 }
+export interface OpenSessionReq { folder: string; session_id: string }
 export interface FabricAgentStatus { running: boolean; reason: string | null }
-export type FabricCheckKind = 'folder' | 'api_key' | 'model' | 'telegram_token';
-export interface FabricCheckReq { kind: FabricCheckKind; path?: string; model?: string }
+export type FabricCheckKind = 'folder' | 'claude' | 'telegram_token';
+export interface FabricCheckReq { kind: FabricCheckKind; path?: string }
 export type FabricCheckResult =
-  | { ok: true; reply?: string; bot_name?: string; user_id?: number }
+  | { ok: true; version?: string; path?: string; bot_name?: string; user_id?: number }
   | { ok: false; reason: string };

@@ -6,11 +6,11 @@ export type Step = (typeof STEPS)[number];
 
 export const FIELDS = [
   'schema', 'id', 'source', 'title', 'due', 'pri', 'state', 'step', 'waiting', 'paused', 'suspended', 'suspend_until', 'created_at', 'updated_at', 'requests',
-  'question', 'answers', 'grants', 'plan_meta', 'assertions', 'approval', 'verdict', 'cost_usd', 'links', 'by', 'needs',
+  'question', 'answers', 'grants', 'plan_meta', 'assertions', 'approval', 'verdict', 'cost_usd', 'links', 'by', 'needs', 'sessions',
 ] as const;
 
-export const SCHEMA = 6;
-export const OPTIONAL_FIELDS: readonly string[] = ['pri', 'paused', 'suspended', 'suspend_until', 'needs', 'by'];
+export const SCHEMA = 7;
+export const OPTIONAL_FIELDS: readonly string[] = ['pri', 'paused', 'suspended', 'suspend_until', 'needs', 'by', 'sessions'];
 
 export const SECTION_HEADINGS = ['Context', 'Spec', 'Success', 'Plan', 'Log'] as const;
 
@@ -21,6 +21,8 @@ export type Redo = 'define' | 'plan';
 export type Author = 'human' | 'agent' | null;
 export interface By { context: Author; spec: Author; success: Author; plan: Author }
 export const NO_AUTHOR: By = { context: null, spec: null, success: null, plan: null };
+export interface Sessions { plan: string | null; execute: string | null; evaluate: string | null }
+export const NO_SESSIONS: Sessions = { plan: null, execute: null, evaluate: null };
 export interface Requires { tools: string[]; checks: string[] }
 
 export interface Requests { delegate: boolean; cancel: boolean; redelegate: boolean; pause: boolean; resume: boolean; complete: boolean; redo: Redo | null }
@@ -97,6 +99,7 @@ export interface FrontMatter {
   plan_meta: PlanMeta | null;
   assertions: Assertion[];
   by: By;
+  sessions: Sessions;
   approval: Approval | null;
   verdict: Verdict | null;
   cost_usd: number;

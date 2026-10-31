@@ -31,6 +31,7 @@
       onunsuspend={() => fabric.unsuspend(h.path)}
       onreload={() => fabric.reload(h.path)}
       readonly={ro}
+      folder={ro ? undefined : folderOf(h.path)}
     >
       {#snippet agent()}
         {@const view = fabric.agents.get(h.path)}

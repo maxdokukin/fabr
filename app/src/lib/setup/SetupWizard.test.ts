@@ -2,34 +2,39 @@ import { describe, expect, it } from 'vitest';
 import { render } from 'svelte/server';
 import SetupWizard from './SetupWizard.svelte';
 import { emptySettings, StubSetupSource } from './setup-source';
-import { firstIncompleteStep, type StepId } from './wizard';
+import { firstIncompleteStep, STEPS, type StepId } from './wizard';
 
-const ORDER = ['folder', 'api_key', 'model', 'telegram_bot', 'telegram_link'];
-const HEADINGS: [StepId, string][] = [
-  ['folder', 'Default folder'], ['api_key', 'Anthropic API key'], ['model', 'Model'],
-  ['telegram_bot', 'Telegram bot'], ['telegram_link', 'Telegram link'], ['done', 'All set'],
+const ORDER = ['folder', 'claude'];
+const HEADINGS: [StepId, string, number][] = [
+  ['folder', 'Default folder', 0], ['claude', 'Claude Code', 1], ['done', 'All set', 2],
 ];
 
 function settingsAt(n: number) {
   const s = emptySettings();
-  s.setup = { completed_steps: ORDER.slice(0, n), completed: n === 5 };
+  s.setup = { completed_steps: ORDER.slice(0, n), completed: n === 2 };
   return s;
 }
 
 describe('SetupWizard render', () => {
-  HEADINGS.forEach(([id, heading], n) => {
-    it(`step ${n + 1} shows ${heading}`, () => {
+  HEADINGS.forEach(([id, heading, n]) => {
+    it(`${id} shows ${heading}`, () => {
       const initial = settingsAt(n);
       expect(firstIncompleteStep(initial)).toBe(id);
       const { body } = render(SetupWizard, { props: { source: new StubSetupSource({ settings: initial }), initial } });
       expect(body).toContain(heading);
-      expect(body).toContain(`Step ${n + 1} of 6`);
+      expect(body).toContain(`Step ${STEPS.indexOf(id) + 1} of 5`);
       expect(body.includes('>Back<')).toBe(n > 0);
     });
   });
   it('offers Open on the last screen', () => {
-    const { body } = render(SetupWizard, { props: { initial: settingsAt(5), source: new StubSetupSource({ settings: settingsAt(5) }) } });
+    const { body } = render(SetupWizard, { props: { initial: settingsAt(2), source: new StubSetupSource({ settings: settingsAt(2) }) } });
     expect(body).toContain('>Open<');
+  });
+  it('the Claude Code screen has the program, model and effort fields', () => {
+    const initial = settingsAt(1);
+    const { body } = render(SetupWizard, { props: { source: new StubSetupSource({ settings: initial }), initial } });
+    for (const t of ['Program', 'Model', 'Effort', 'Sonnet', 'Fable', 'Extra high', '>Check<']) expect(body).toContain(t);
+    expect(body).not.toContain('API');
   });
 });
 
@@ -47,6 +52,6 @@ describe('stub source behaviour', () => {
     expect(r.ok).toBe(true);
     const s = (await stub.readSettings()).settings;
     await stub.writeSettings(markStep({ ...s, default_folder: '~/' }, 'folder'));
-    expect(firstIncompleteStep((await stub.readSettings()).settings)).toBe('api_key');
+    expect(firstIncompleteStep((await stub.readSettings()).settings)).toBe('claude');
   });
 });

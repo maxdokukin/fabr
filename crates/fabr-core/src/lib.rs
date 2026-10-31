@@ -1,10 +1,12 @@
 pub mod backend;
+pub mod ccsession;
 pub mod dto;
 pub mod error;
 pub mod fabric;
 mod fixture_tree;
 pub mod fs;
 pub mod item;
+pub mod knowledge;
 pub mod logging;
 pub mod meta;
 pub mod node;
@@ -21,6 +23,7 @@ pub mod sources;
 pub mod stamp;
 mod sync;
 pub mod taskrec;
+pub mod telegram;
 pub mod todo;
 pub mod workspace;
 

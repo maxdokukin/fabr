@@ -146,17 +146,12 @@ pub struct SettingsWriteReq {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SecretsWriteReq {
     #[serde(default)]
-    pub anthropic_api_key: Option<String>,
-    #[serde(default)]
     pub telegram_bot_token: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretsStatus {
-    pub anthropic_api_key: bool,
     pub telegram_bot_token: bool,
-    #[serde(default)]
-    pub anthropic_api_key_fingerprint: Option<String>,
     #[serde(default)]
     pub telegram_bot_token_fingerprint: Option<String>,
 }
@@ -166,8 +161,6 @@ pub struct CheckReq {
     pub kind: String,
     #[serde(default)]
     pub path: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -300,24 +293,16 @@ pub fn read_secret(ctx: &Ctx, key: &str) -> Option<String> {
 pub fn secrets_write(ctx: &Ctx, req: SecretsWriteReq) -> Result<SecretsStatus, FabrError> {
     let path = ctx.secrets_path();
     let mut doc = load_doc(&path)?.unwrap_or_default();
-    for (k, v) in [("anthropic_api_key", &req.anthropic_api_key), ("telegram_bot_token", &req.telegram_bot_token)] {
-        if let Some(v) = v.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
-            doc[k] = value(v);
-        }
+    if let Some(v) = req.telegram_bot_token.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        doc["telegram_bot_token"] = value(v);
     }
     atomic_write(&path, doc.to_string().as_bytes(), true)?;
     Ok(secrets_status(ctx))
 }
 
 pub fn secrets_status(ctx: &Ctx) -> SecretsStatus {
-    let key = read_secret(ctx, "anthropic_api_key");
     let token = read_secret(ctx, "telegram_bot_token");
-    SecretsStatus {
-        anthropic_api_key: key.is_some(),
-        telegram_bot_token: token.is_some(),
-        anthropic_api_key_fingerprint: key.as_deref().map(crate::redact::fingerprint),
-        telegram_bot_token_fingerprint: token.as_deref().map(crate::redact::fingerprint),
-    }
+    SecretsStatus { telegram_bot_token: token.is_some(), telegram_bot_token_fingerprint: token.as_deref().map(crate::redact::fingerprint) }
 }
 
 fn fail(reason: &str) -> Value {
@@ -348,16 +333,6 @@ fn agent(secs: u64) -> ureq::Agent {
     ureq::AgentBuilder::new().timeout(Duration::from_secs(secs)).build()
 }
 
-fn message_call(ctx: &Ctx, key: &str, model: &str, prompt: &str) -> Reply {
-    let req = agent(30)
-        .post(&format!("{}/v1/messages", ctx.anthropic_url.trim_end_matches('/')))
-        .set("x-api-key", key)
-        .set("anthropic-version", "2023-06-01");
-    let body = json!({ "model": model, "max_tokens": 16, "messages": [{ "role": "user", "content": prompt }] });
-    send(req, Some(&body))
-}
-
-const ANTHROPIC_DOWN: &str = "Could not reach Anthropic. Check the internet connection and try again.";
 const TELEGRAM_DOWN: &str = "Could not reach Telegram. Check the internet connection and try again.";
 
 pub fn check_folder(ctx: &Ctx, path: &str) -> Value {
@@ -378,30 +353,92 @@ pub fn check_folder(ctx: &Ctx, path: &str) -> Value {
     }
 }
 
-pub fn check_api_key(ctx: &Ctx) -> Value {
-    let Some(key) = read_secret(ctx, "anthropic_api_key") else { return fail("No API key is saved yet. Enter it first.") };
-    match message_call(ctx, &key, MODELS[0], "Say ok.") {
-        Reply::Json(200, _) => json!({ "ok": true }),
-        Reply::Json(401, _) => fail("The API key was not accepted"),
-        Reply::Json(c, _) => fail(&format!("Anthropic answered with HTTP {c}. Try again in a moment.")),
-        Reply::Down => fail(ANTHROPIC_DOWN),
+const CLAUDE_MISSING: &str = "Claude Code is not installed. Install it from https://claude.com/claude-code, then press Check again.";
+const CLAUDE_TIMEOUT_S: u64 = 10;
+
+fn is_executable(p: &Path) -> bool {
+    let Ok(m) = std::fs::metadata(p) else { return false };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        m.is_file() && m.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        m.is_file()
     }
 }
 
-pub fn check_model(ctx: &Ctx, model: &str) -> Value {
-    if !MODELS.contains(&model) {
-        return fail(&format!("Model must be one of {}.", MODELS.join(" or ")));
-    }
-    let Some(key) = read_secret(ctx, "anthropic_api_key") else { return fail("No API key is saved yet. Enter it first.") };
-    match message_call(ctx, &key, model, "Reply with one short line saying hello.") {
-        Reply::Json(200, v) => {
-            let text = v["content"].as_array().and_then(|a| a.iter().find_map(|b| b["text"].as_str())).unwrap_or("").trim().to_string();
-            json!({ "ok": true, "reply": text })
+fn on_path(name: &str) -> Option<PathBuf> {
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths).map(|d| d.join(name)).find(|p| is_executable(p))
+}
+
+pub fn check_claude(ctx: &Ctx) -> Value {
+    let bin = settings_read(ctx).map(|r| r.settings.claude_bin).unwrap_or_default();
+    check_claude_at(ctx, &bin)
+}
+
+pub fn check_claude_at(ctx: &Ctx, bin: &str) -> Value {
+    check_claude_timeout(ctx, bin, Duration::from_secs(CLAUDE_TIMEOUT_S))
+}
+
+fn check_claude_timeout(ctx: &Ctx, bin: &str, limit: Duration) -> Value {
+    let bin = bin.trim();
+    let path = if bin.is_empty() {
+        match on_path("claude") {
+            Some(p) => p,
+            None => return fail(CLAUDE_MISSING),
         }
-        Reply::Json(401, _) => fail("The API key was not accepted"),
-        Reply::Json(c, _) => fail(&format!("Anthropic did not accept that model (HTTP {c}).")),
-        Reply::Down => fail(ANTHROPIC_DOWN),
+    } else {
+        let p = expand_home(bin, &ctx.home);
+        if p.components().count() > 1 || bin.starts_with('.') {
+            if !p.exists() {
+                return fail(&format!("Nothing found at {}. Check the path, or clear it to use claude from PATH.", p.display()));
+            }
+            p
+        } else {
+            match on_path(bin) {
+                Some(p) => p,
+                None => return fail(&format!("{bin} was not found on PATH. Enter its full path.")),
+            }
+        }
+    };
+    if !is_executable(&path) {
+        return fail(&format!("{} is not an executable file.", path.display()));
     }
+    let mut child = match std::process::Command::new(&path)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return fail(&format!("Could not run {}: {}.", path.display(), e.kind())),
+    };
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return fail(&format!("{} --version did not answer in {} seconds. Press Check again.", path.display(), limit.as_secs()));
+            }
+            Err(e) => return fail(&format!("Could not run {}: {}.", path.display(), e.kind())),
+        }
+    };
+    let mut out = String::new();
+    if let Some(mut so) = child.stdout.take() {
+        let _ = std::io::Read::read_to_string(&mut so, &mut out);
+    }
+    let version = out.lines().next().unwrap_or("").trim().to_string();
+    if !status.success() || version.is_empty() {
+        return fail(&format!("{} --version failed. Is this the Claude Code program?", path.display()));
+    }
+    json!({ "ok": true, "version": version, "path": path.to_string_lossy() })
 }
 
 fn tg(ctx: &Ctx, token: &str, method: &str) -> String {
@@ -480,8 +517,10 @@ pub fn check(ctx: &Ctx, req: CheckReq) -> Result<Value, FabrError> {
     let need = |v: &Option<String>, what: &str| v.clone().ok_or_else(|| FabrError::BadRequest(format!("{what} is required")));
     Ok(match req.kind.as_str() {
         "folder" => check_folder(ctx, &need(&req.path, "path")?),
-        "api_key" => check_api_key(ctx),
-        "model" => check_model(ctx, &need(&req.model, "model")?),
+        "claude" => match req.path.as_deref() {
+            Some(p) => check_claude_at(ctx, p),
+            None => check_claude(ctx),
+        },
         "telegram_token" => check_telegram_token(ctx),
         k => return Err(FabrError::BadRequest(format!("unknown check {k:?}"))),
     })
@@ -505,7 +544,7 @@ mod tests {
         _stop: Arc<std::sync::atomic::AtomicBool>,
     }
 
-    fn fake(api_status: u16, updates: Vec<Value>) -> Fake {
+    fn fake(updates: Vec<Value>) -> Fake {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let url = format!("http://{}", server.server_addr().to_ip().unwrap());
         let log: Log = Arc::default();
@@ -519,15 +558,8 @@ mod tests {
                 let _ = std::io::Read::read_to_string(rq.as_reader(), &mut text);
                 let body: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
                 let path = rq.url().to_string();
-                let key = rq.headers().iter().find(|h| h.field.equiv("x-api-key")).map(|h| h.value.to_string());
-                l.lock().unwrap().push((path.clone(), json!({ "body": body, "key": key })));
-                let (code, out) = if path == "/v1/messages" {
-                    if api_status == 200 {
-                        (200, json!({ "content": [{ "type": "text", "text": "Hello there." }] }))
-                    } else {
-                        (api_status, json!({ "type": "error" }))
-                    }
-                } else if path.ends_with("/getMe") {
+                l.lock().unwrap().push((path.clone(), json!({ "body": body })));
+                let (code, out) = if path.ends_with("/getMe") {
                     (200, json!({ "ok": true, "result": { "first_name": "Fabr Bot", "username": "fabr_test_bot" } }))
                 } else if path.ends_with("/getUpdates") {
                     let next = queue.pop_front().map(|u| vec![u]).unwrap_or_default();
@@ -553,17 +585,9 @@ mod tests {
     fn ctx(f: &Fake) -> (tempfile::TempDir, Ctx) {
         let d = tempfile::tempdir().unwrap();
         let mut c = Ctx::new(d.path());
-        c.anthropic_url = f.url.clone();
         c.telegram_url = f.url.clone();
         c.poll_s = 0;
-        secrets_write(
-            &c,
-            SecretsWriteReq {
-                anthropic_api_key: Some("sk-ant-FIXTURE-NOT-REAL".into()),
-                telegram_bot_token: Some("123456:FAKE-TOKEN".into()),
-            },
-        )
-        .unwrap();
+        secrets_write(&c, SecretsWriteReq { telegram_bot_token: Some("123456:FAKE-TOKEN".into()) }).unwrap();
         (d, c)
     }
 
@@ -586,9 +610,11 @@ mod tests {
         std::fs::write(c.settings_path(), "future_key = \"x\"\n[setup]\nextra = 1\n").unwrap();
         let mut s = settings_read(&c).unwrap().settings;
         s.telegram_user_id = Some(42);
-        s.setup.completed_steps = vec!["folder".into(), "api_key".into()];
+        s.setup.completed_steps = vec!["folder".into(), "api_key".into(), "model".into()];
         s.setup.completed = true;
         s.model = "claude-haiku-5-5".into();
+        s.claude_bin = "/opt/claude".into();
+        s.effort = "high".into();
         let w = settings_write(&c, SettingsWriteReq { settings: s.clone() }).unwrap();
         assert!(w.exists);
         assert_eq!(w.settings, s);
@@ -603,25 +629,40 @@ mod tests {
     }
 
     #[test]
-    fn secrets_are_private_merged_and_never_reported() {
+    fn secrets_are_private_and_never_reported() {
         let d = tempfile::tempdir().unwrap();
         let c = Ctx::new(d.path());
         let st = secrets_status(&c);
-        assert!(!st.anthropic_api_key && !st.telegram_bot_token && st.anthropic_api_key_fingerprint.is_none());
-        let st = secrets_write(&c, SecretsWriteReq { anthropic_api_key: Some("sk-ant-FIXTURE-NOT-REAL".into()), telegram_bot_token: None })
-            .unwrap();
-        assert!(st.anthropic_api_key && !st.telegram_bot_token);
-        assert_eq!(st.anthropic_api_key_fingerprint.as_deref(), Some("sk-ant-…REAL"));
-        let st =
-            secrets_write(&c, SecretsWriteReq { anthropic_api_key: None, telegram_bot_token: Some("123456:FAKE-TOKEN".into()) }).unwrap();
-        assert!(st.anthropic_api_key && st.telegram_bot_token);
-        assert_eq!(read_secret(&c, "anthropic_api_key").as_deref(), Some("sk-ant-FIXTURE-NOT-REAL"));
-        assert!(!serde_json::to_string(&st).unwrap().contains("FIXTURE"));
+        assert!(!st.telegram_bot_token && st.telegram_bot_token_fingerprint.is_none());
+        std::fs::create_dir_all(c.space()).unwrap();
+        std::fs::write(c.secrets_path(), "anthropic_api_key = \"sk-ant-OLD\"\n").unwrap();
+        let st = secrets_write(&c, SecretsWriteReq { telegram_bot_token: Some("123456:FAKE-TOKEN".into()) }).unwrap();
+        assert!(st.telegram_bot_token);
+        assert_eq!(read_secret(&c, "telegram_bot_token").as_deref(), Some("123456:FAKE-TOKEN"));
+        assert!(std::fs::read_to_string(c.secrets_path()).unwrap().contains("sk-ant-OLD"));
+        let json = serde_json::to_string(&st).unwrap();
+        assert!(!json.contains("FAKE-TOKEN") && !json.contains("OLD"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(c.secrets_path()).unwrap().permissions().mode() & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn old_settings_with_api_steps_still_load() {
+        let d = tempfile::tempdir().unwrap();
+        let c = Ctx::new(d.path());
+        std::fs::create_dir_all(c.space()).unwrap();
+        std::fs::write(
+            c.settings_path(),
+            "model = \"claude-sonnet-5-5\"\n[setup]\ncompleted_steps = [\"folder\", \"api_key\", \"model\"]\ncompleted = true\n",
+        )
+        .unwrap();
+        let s = settings_read(&c).unwrap().settings;
+        assert_eq!(s.setup.completed_steps, ["folder", "api_key", "model"]);
+        assert_eq!(s.claude_bin, "");
+        assert!(valid_model(&s.model));
     }
 
     #[test]
@@ -652,35 +693,64 @@ mod tests {
         assert_eq!(check_folder(&c, d.path().join("nope").to_str().unwrap())["ok"], false);
     }
 
+    #[cfg(unix)]
+    fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join(name);
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    #[cfg(unix)]
     #[test]
-    #[ignore = "replaced by the claude check"]
-    fn api_key_and_model_checks() {
-        let f = fake(200, vec![]);
-        let (_d, c) = ctx(&f);
-        assert_eq!(check_api_key(&c), json!({ "ok": true }));
-        assert_eq!(check_model(&c, "claude-haiku-5-5"), json!({ "ok": true, "reply": "Hello there." }));
-        assert_eq!(check_model(&c, "gpt-4")["ok"], false);
-        let log = f.log.lock().unwrap();
-        assert_eq!(log.len(), 2);
-        assert_eq!(log[0].1["key"], "sk-ant-FIXTURE-NOT-REAL");
-        assert_eq!(log[0].1["body"]["model"], "claude-sonnet-5-5");
-        assert_eq!(log[0].1["body"]["max_tokens"], 16);
-        assert_eq!(log[1].1["body"]["model"], "claude-haiku-5-5");
+    fn claude_check_reports_version_and_path() {
+        let d = tempfile::tempdir().unwrap();
+        let c = Ctx::new(d.path());
+        let bin = script(d.path(), "claude", "echo '2.1.287 (Claude Code)'");
+        let r = check_claude_at(&c, bin.to_str().unwrap());
+        assert_eq!(r, json!({ "ok": true, "version": "2.1.287 (Claude Code)", "path": bin.to_str().unwrap() }));
+        let mut s = settings_read(&c).unwrap().settings;
+        s.claude_bin = bin.to_string_lossy().into_owned();
+        settings_write(&c, SettingsWriteReq { settings: s }).unwrap();
+        assert_eq!(check_claude(&c)["ok"], true);
+        assert_eq!(check(&c, CheckReq { kind: "claude".into(), path: None }).unwrap()["version"], "2.1.287 (Claude Code)");
+    }
 
-        let f = fake(401, vec![]);
-        let (_d, c) = ctx(&f);
-        assert_eq!(check_api_key(&c), json!({ "ok": false, "reason": "The API key was not accepted" }));
+    #[cfg(unix)]
+    #[test]
+    fn claude_check_failures_are_actionable() {
+        let d = tempfile::tempdir().unwrap();
+        let c = Ctx::new(d.path());
+        let missing = check_claude_at(&c, d.path().join("nope").to_str().unwrap());
+        assert_eq!(missing["ok"], false);
+        assert!(missing["reason"].as_str().unwrap().contains("Nothing found"));
+        let plain = d.path().join("plain");
+        std::fs::write(&plain, "x").unwrap();
+        let r = check_claude_at(&c, plain.to_str().unwrap());
+        assert!(r["reason"].as_str().unwrap().contains("not an executable"));
+        let bad = script(d.path(), "bad", "exit 3");
+        assert_eq!(check_claude_at(&c, bad.to_str().unwrap())["ok"], false);
+        let slow = script(d.path(), "slow", "exec sleep 5");
+        let t = Instant::now();
+        let r = check_claude_timeout(&c, slow.to_str().unwrap(), Duration::from_millis(200));
+        assert!(t.elapsed() < Duration::from_secs(3));
+        assert!(r["reason"].as_str().unwrap().contains("did not answer"));
+    }
 
-        let mut c2 = c.clone();
-        c2.anthropic_url = "http://127.0.0.1:1".into();
-        let r = check_api_key(&c2);
+    #[test]
+    fn claude_not_installed_message() {
+        let d = tempfile::tempdir().unwrap();
+        let c = Ctx::new(d.path());
+        let r = check_claude_at(&c, "definitely-not-a-fabr-claude-binary");
         assert_eq!(r["ok"], false);
-        assert!(!r.to_string().contains("FIXTURE"));
+        assert!(r["reason"].as_str().unwrap().contains("PATH"));
+        assert!(CLAUDE_MISSING.contains("https://claude.com/claude-code") && CLAUDE_MISSING.contains("press Check again"));
     }
 
     #[test]
     fn telegram_token_check() {
-        let f = fake(200, vec![]);
+        let f = fake(vec![]);
         let (_d, c) = ctx(&f);
         assert_eq!(check_telegram_token(&c), json!({ "ok": true, "bot_name": "fabr_test_bot" }));
         assert!(f.log.lock().unwrap()[0].0.contains("bot123456:FAKE-TOKEN/getMe"));
@@ -690,7 +760,7 @@ mod tests {
 
     #[test]
     fn link_happy_path_ignores_other_users() {
-        let f = fake(200, vec![msg(1, 7), msg(2, 99), tap(3, 99, "confirm"), tap(4, 7, "confirm")]);
+        let f = fake(vec![msg(1, 7), msg(2, 99), tap(3, 99, "confirm"), tap(4, 7, "confirm")]);
         let (_d, c) = ctx(&f);
         assert_eq!(telegram_link(&c, 10), json!({ "ok": true, "user_id": 7 }));
         let log = f.log.lock().unwrap();
@@ -707,7 +777,7 @@ mod tests {
 
     #[test]
     fn link_times_out_without_a_message() {
-        let f = fake(200, vec![]);
+        let f = fake(vec![]);
         let (_d, c) = ctx(&f);
         let r = telegram_link(&c, 1);
         assert_eq!(r, json!({ "ok": false, "reason": NO_MESSAGE }));

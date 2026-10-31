@@ -2,9 +2,9 @@ import { errText, type FabricCheckResult, type FabricSecretsStatus, type FabricS
 import { createSetupSource, type SetupSource } from '../setup/setup-source';
 
 export interface Outcome { ok: boolean; text: string }
-export type Probe = 'key' | 'model' | 'token' | 'link';
+export type Probe = 'claude' | 'token' | 'link';
 
-const NO_SECRETS: FabricSecretsStatus = { anthropic_api_key: false, telegram_bot_token: false };
+const NO_SECRETS: FabricSecretsStatus = { telegram_bot_token: false };
 const LINK_TIMEOUT_S = 120;
 
 export function parseWhole(text: string, min: number, max: number): number | null {
@@ -34,8 +34,8 @@ export class SetupPanel {
     this.factory = factory;
   }
 
-  get keySaved(): boolean {
-    return this.secrets.anthropic_api_key;
+  get claudeReady(): boolean {
+    return !!this.settings?.setup.completed_steps.includes('claude');
   }
   get tokenSaved(): boolean {
     return this.secrets.telegram_bot_token;
@@ -45,9 +45,6 @@ export class SetupPanel {
   }
   get telegramReady(): boolean {
     return this.tokenSaved && this.linkedId !== null;
-  }
-  get keyFingerprint(): string {
-    return this.secrets.anthropic_api_key_fingerprint ?? 'saved';
   }
   get tokenFingerprint(): string {
     return this.secrets.telegram_bot_token_fingerprint ?? 'saved';
@@ -99,14 +96,14 @@ export class SetupPanel {
     return ok;
   }
 
-  async saveSecret(field: 'anthropic_api_key' | 'telegram_bot_token', value: string): Promise<boolean> {
+  async saveSecret(value: string): Promise<boolean> {
     if (!this.src || !value.trim()) return false;
     const src = this.src;
     this.busy = 'save';
     const ok = await this.guard(async () => {
-      this.secrets = await src.writeSecrets({ [field]: value });
+      this.secrets = await src.writeSecrets({ telegram_bot_token: value });
     });
-    if (ok) delete this.results[field === 'anthropic_api_key' ? 'key' : 'token'];
+    if (ok) delete this.results.token;
     this.busy = null;
     return ok;
   }
@@ -124,12 +121,8 @@ export class SetupPanel {
     this.busy = null;
   }
 
-  testKey(): Promise<void> {
-    return this.probe('key', () => this.src!.check('api_key'), () => 'Key works');
-  }
-
-  testModel(model: string): Promise<void> {
-    return this.probe('model', () => this.src!.check('model', { model }), (r) => r.reply ?? 'Model works');
+  testClaude(bin: string): Promise<void> {
+    return this.probe('claude', () => this.src!.check('claude', { path: bin.trim() }), (r) => [r.version, r.path].filter(Boolean).join(' at ') || 'Claude Code works');
   }
 
   testToken(): Promise<void> {

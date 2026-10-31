@@ -18,8 +18,8 @@
   <NavRow label="Advanced" onclick={() => ctl.push({ kind: 'advanced' })} />
 </Group>
 <Group>
-  <NavRow label="API" onclick={() => ctl.push({ kind: 'api' })}>
-    {#snippet lead()}<span class="row-dot" class:row-dot--ok={setup.keySaved}></span>{/snippet}
+  <NavRow label="Claude Code" onclick={() => ctl.push({ kind: 'claude' })}>
+    {#snippet lead()}<span class="row-dot" class:row-dot--ok={setup.claudeReady}></span>{/snippet}
   </NavRow>
   <NavRow label="Telegram" onclick={() => ctl.push({ kind: 'telegram' })}>
     {#snippet lead()}<span class="row-dot" class:row-dot--ok={setup.telegramReady}></span>{/snippet}

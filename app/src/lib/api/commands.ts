@@ -1,7 +1,7 @@
 import type {
   Tree, Stamp, Node, NodeRef, RemoveNodeReq, SaveMetaReq, Source, TestResult, Settings, ListDirsReq, DirEntry,
   InitChildrenReq, FabricListReq, FabricListRes, FabricReadRes, FabricWriteReq, FabricWriteRes, FabricStampReq, FabricRemoteListRes, FabricRemoteWriteReq, FabricRemoteCreateReq, FabricCreateReq, FabricCreateRes, ImportTodosReq, ImportTodosRes, HostKey, TrustResult, PasswordState, InstallKeyReq, InstallKeyResult,
-  FabricSettings, FabricSettingsRead, FabricSecretsWriteReq, FabricSecretsStatus, FabricCheckReq, FabricCheckResult, FabricAgentStatus,
+  FabricSettings, FabricSettingsRead, FabricSecretsWriteReq, FabricSecretsStatus, FabricCheckReq, FabricCheckResult, FabricAgentStatus, OpenSessionReq,
 } from './types';
 
 export interface Command<A extends unknown[], R> {
@@ -50,6 +50,7 @@ export const COMMANDS = {
   fabricSecretsStatus: op<[], FabricSecretsStatus>({}),
   fabricCheck: op<[req: FabricCheckReq], FabricCheckResult>({ req: self }),
   fabricTelegramLink: op<[timeout_s?: number], FabricCheckResult>({ req: (timeout_s) => ({ timeout_s }) }),
+  fabricOpenSession: op<[req: OpenSessionReq], void>({ req: self }),
   fabricAgentStatus: op<[], FabricAgentStatus>({}),
   fabricAgentStart: op<[], FabricAgentStatus>({}),
   installKey: op<[req: InstallKeyReq], InstallKeyResult>({ req: self }),

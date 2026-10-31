@@ -3,7 +3,7 @@
   import type { Store } from '../store.svelte';
   import Page from '../ui/Page.svelte';
   import AdvancedPage from './AdvancedPage.svelte';
-  import ApiPage from './ApiPage.svelte';
+  import ClaudePage from './ClaudePage.svelte';
   import AppearancePage from './AppearancePage.svelte';
   import { SettingsController } from './controller.svelte';
   import RootPage from './RootPage.svelte';
@@ -56,7 +56,7 @@
           {:else if ctl.page.kind === 'appearance'}<AppearancePage {store} />
           {:else if ctl.page.kind === 'sources'}<SourcesPage {ctl} />
           {:else if ctl.page.kind === 'advanced'}<AdvancedPage {store} {ctl} />
-          {:else if ctl.page.kind === 'api'}<ApiPage {ctl} />
+          {:else if ctl.page.kind === 'claude'}<ClaudePage {ctl} />
           {:else if ctl.page.kind === 'telegram'}<TelegramPage {ctl} />
           {:else if ctl.page.kind === 'keys'}<ShortcutsPage />
           {:else if draft}<SourcePage {store} {ctl} d={draft} />

@@ -5,14 +5,14 @@
   import Group from '../ui/Group.svelte';
   import Page from '../ui/Page.svelte';
   import Row from '../ui/Row.svelte';
-  import Segmented from '../ui/Segmented.svelte';
+  import ClaudeFields from './ClaudeFields.svelte';
   import { createSetupSource, type SetupSource } from './setup-source';
-  import { canGoBack, firstIncompleteStep, markStep, MODELS, next, prev, stepIndex, STEPS, type StepId } from './wizard';
+  import { canGoBack, canSkip, firstIncompleteStep, markStep, next, prev, stepIndex, STEPS, type StepId } from './wizard';
 
   let { source, initial, ondone }: { source?: SetupSource; initial?: FabricSettings; ondone?: () => void } = $props();
 
   const TITLES: Record<StepId, string> = {
-    folder: 'Default folder', api_key: 'Anthropic API key', model: 'Model',
+    folder: 'Default folder', claude: 'Claude Code',
     telegram_bot: 'Telegram bot', telegram_link: 'Telegram link', done: 'All set',
   };
 
@@ -21,15 +21,17 @@
   let settings = $state<FabricSettings | null>(seed ?? null);
   let step = $state<StepId>(seed ? firstIncompleteStep(seed) : 'folder');
   let loadError = $state<string | null>(null);
-  let secrets = $state<FabricSecretsStatus>({ anthropic_api_key: false, telegram_bot_token: false });
+  let secrets = $state<FabricSecretsStatus>({ telegram_bot_token: false });
   let busy = $state(false);
   let passed = $state(false);
   let reason = $state<string | null>(null);
   let info = $state<string | null>(null);
 
   let folder = $state(seed?.default_folder || '~/');
-  let apiKey = $state('');
-  let model = $state(seed?.model || MODELS[0].value);
+  let claudeBin = $state(seed?.claude_bin ?? '');
+  let model = $state(seed?.model ?? '');
+  let effort = $state(seed?.effort ?? '');
+  let found = $state<{ path?: string; version?: string } | null>(null);
   let token = $state('');
   let botName = $state<string | null>(null);
   let waiting = $state(false);
@@ -53,7 +55,9 @@
         const r = await src.readSettings();
         settings = r.settings;
         folder = r.settings.default_folder || '~/';
-        model = r.settings.model || MODELS[0].value;
+        claudeBin = r.settings.claude_bin;
+        model = r.settings.model;
+        effort = r.settings.effort;
         enter(firstIncompleteStep(r.settings));
       } else {
         enter(step);
@@ -87,22 +91,12 @@
 
   const checkFolder = () => run(() => src!.check('folder', { path: folder.trim() }), async () => { await persist({ default_folder: folder.trim() }, 'folder'); folder = settings!.default_folder; });
 
-  const checkKey = () => run(async () => {
-    secrets = await src!.writeSecrets({ anthropic_api_key: apiKey });
-    return src!.check('api_key');
-  }, async () => {
-    apiKey = '';
-    secrets = await src!.secretsStatus();
-    await persist({}, 'api_key');
+  const checkClaude = () => run(() => src!.check('claude', { path: claudeBin.trim() }), async (r) => {
+    found = { path: r.path, version: r.version };
+    await persist({ claude_bin: claudeBin.trim(), model, effort }, 'claude');
   });
 
-  const checkModel = () => run(async () => {
-    await persist({ model });
-    return src!.check('model', { model });
-  }, async (r) => {
-    info = r.reply ?? null;
-    await persist({}, 'model');
-  });
+  const savePicks = () => { if (passed) void persist({ model, effort }); };
 
   const checkToken = () => run(async () => {
     secrets = await src!.writeSecrets({ telegram_bot_token: token });
@@ -142,16 +136,11 @@
         <Row label="Folder"><input class="row-input" type="text" bind:value={folder} oninput={() => (passed = false)} spellcheck="false" autocomplete="off" /></Row>
       </Group>
       <Button variant="primary" disabled={busy || !folder.trim()} onclick={checkFolder}>{busy ? 'Checking' : 'Check'}</Button>
-    {:else if step === 'api_key'}
-      <Group header="Paste your key" footer={reason ?? (secrets.anthropic_api_key && passed ? 'The key is saved and hidden.' : 'It is stored on this computer and never shown again.')} error={!!reason}>
-        <Row label="API key"><input class="row-input" type="password" bind:value={apiKey} oninput={() => (passed = false)} placeholder={secrets.anthropic_api_key ? '••••••••  saved' : 'sk-ant-...'} autocomplete="off" spellcheck="false" /></Row>
+    {:else if step === 'claude'}
+      <Group header="Claude Code runs your tasks" footer={reason ?? (found ? 'Claude Code is ready.' : 'Fabr uses the Claude Code program on this computer. Leave the path empty to find it automatically.')} error={!!reason}>
+        <ClaudeFields bind:bin={claudeBin} bind:model bind:effort {found} onbin={() => { passed = false; found = null; }} onpick={savePicks} />
       </Group>
-      <Button variant="primary" disabled={busy || !apiKey} onclick={checkKey}>{busy ? 'Checking' : 'Check'}</Button>
-    {:else if step === 'model'}
-      <Group header="Choose a model" footer={reason ?? info ?? 'Sonnet is suggested.'} error={!!reason}>
-        <Row label="Model"><Segmented label="Model" options={MODELS} bind:value={model} onchange={() => (passed = false)} /></Row>
-      </Group>
-      <Button variant="primary" disabled={busy} onclick={checkModel}>{busy ? 'Checking' : 'Check'}</Button>
+      <Button variant="primary" disabled={busy} onclick={checkClaude}>{busy ? 'Checking' : 'Check'}</Button>
     {:else if step === 'telegram_bot'}
       <Group header="Create the bot" footer={reason ?? (info ? `Bot: ${info}` : undefined)} error={!!reason}>
         <Row label="1. Open BotFather in Telegram" />
@@ -167,18 +156,18 @@
       </Group>
       <Button variant="primary" disabled={busy} onclick={startLink}>{reason ? 'Retry' : 'Start'}</Button>
     {:else}
-      <Group header="Summary" footer="Secrets are saved and never shown.">
+      <Group header="Summary" footer="You can change all of this later in Settings.">
         <Row label="Folder" value={settings.default_folder} />
-        <Row label="API key" value={secrets.anthropic_api_key ? 'saved' : 'missing'} />
-        <Row label="Model" value={settings.model} />
-        <Row label="Bot" value={botName ?? (secrets.telegram_bot_token ? 'saved' : 'missing')} />
-        <Row label="Telegram user id" value={String(settings.telegram_user_id ?? '')} />
+        <Row label="Claude Code" value={found?.version || 'ready'} />
+        <Row label="Model" value={settings.model || 'default'} />
+        <Row label="Telegram" value={settings.telegram_user_id ? `linked as ${settings.telegram_user_id}` : secrets.telegram_bot_token ? 'bot saved' : 'skipped'} />
       </Group>
       <Button variant="primary" onclick={() => ondone?.()}>Open</Button>
     {/if}
 
     <div class="setup-nav">
       {#if canGoBack(step)}<Button variant="plain" disabled={busy} onclick={() => go(prev(step))}>Back</Button>{/if}
+      {#if canSkip(step) && !passed}<Button variant="plain" disabled={busy} onclick={() => go('done')}>Skip</Button>{/if}
       {#if step !== 'done'}<Button variant="primary" disabled={!passed || busy} onclick={() => go(next(step))}>Next</Button>{/if}
     </div>
   {/if}

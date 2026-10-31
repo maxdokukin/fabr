@@ -35,6 +35,9 @@ async function call(name: string, get: boolean, req: unknown): Promise<unknown> 
 
 function realHttpApi(): Api {
   return buildApi(call, {
+    fabricOpenSession: async () => {
+      throw new ApiError(501, 'Opening a terminal works in the desktop app only');
+    },
     openUrl: async (url) => {
       if (/^https?:\/\//i.test(url)) window.open(url, '_blank', 'noopener');
     },

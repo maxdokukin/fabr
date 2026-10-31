@@ -83,6 +83,7 @@ export function serializeFrontMatter(r: TaskRecord): string[] {
         break;
       }
       case 'by': add(`by: ${flowMap({ context: r.by.context, spec: r.by.spec, success: r.by.success, plan: r.by.plan })}`); break;
+      case 'sessions': add(`sessions: ${flowMap({ plan: r.sessions.plan, execute: r.sessions.execute, evaluate: r.sessions.evaluate })}`); break;
       case 'links': add(`links: ${flowMap(r.links)}`); break;
       case 'source':
         if (r.source === null) add('source: null');

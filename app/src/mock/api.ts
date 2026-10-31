@@ -25,11 +25,12 @@ export function createMockApi(opts: MockOpts = {}): Api {
   ];
   let settings: Settings = { poll_ms: 2000, remote_poll_ms: 30000, search_depth: 6, full_rescan_ms: 30000, max_nodes: 10000, log_path: '/tmp/fabr/fabr.log' };
   let fabSettings: FabricSettings = {
-    default_folder: '~/', model: 'claude-sonnet-5-5', telegram_user_id: null, auto_mode: false,
+    default_folder: '~/', model: '', telegram_user_id: null, auto_mode: false,
     question_budget: 5, heartbeat_interval_s: 10, execute: 'full', capabilities: { tools: ['read_file', 'write_file', 'run_command'], checks: ['git', 'cargo'] }, setup: { completed_steps: [], completed: false },
+    claude_bin: '', effort: '',
   };
   let fabSettingsExist = false;
-  const fabSecrets: FabricSecretsStatus = { anthropic_api_key: false, telegram_bot_token: false };
+  const fabSecrets: FabricSecretsStatus = { telegram_bot_token: false };
   const fabric = new FixtureSource();
   const FAB_EVENTS = '/fixtures/home/.fabric-space/events.log';
   const remote = remoteFixtures(today);
@@ -228,16 +229,16 @@ export function createMockApi(opts: MockOpts = {}): Api {
     async fabricSettingsWrite(s) { await wait(); fabSettings = clone(s); fabSettingsExist = true; return { exists: true, settings: clone(fabSettings) }; },
     async fabricSecretsWrite(req) {
       await wait();
-      if (req.anthropic_api_key) fabSecrets.anthropic_api_key = true;
       if (req.telegram_bot_token) fabSecrets.telegram_bot_token = true;
       return { ...fabSecrets };
     },
     async fabricSecretsStatus() { await wait(); return { ...fabSecrets }; },
+    async fabricOpenSession() { throw new ApiError(501, 'Opening a terminal works in the desktop app only'); },
     async fabricAgentStatus() { return { running: true, reason: null }; },
     async fabricAgentStart() { return { running: true, reason: null }; },
     async fabricCheck(req) {
       await wait();
-      if (req.kind === 'model') return { ok: true, reply: 'Hello from the mock.' };
+      if (req.kind === 'claude') return { ok: true, version: '2.1.287 (Claude Code)', path: req.path || '/usr/local/bin/claude' };
       if (req.kind === 'telegram_token') return { ok: true, bot_name: 'fabr_mock_bot' };
       return { ok: true };
     },

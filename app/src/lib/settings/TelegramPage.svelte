@@ -11,7 +11,7 @@
   onMount(() => { void p.load(); });
 
   async function save() {
-    if (await p.saveSecret('telegram_bot_token', secret)) secret = '';
+    if (await p.saveSecret(secret)) secret = '';
   }
 </script>
 

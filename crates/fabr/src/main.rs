@@ -96,8 +96,7 @@ enum Cmd {
 #[derive(Subcommand)]
 enum CheckCmd {
     Folder { path: String },
-    ApiKey,
-    Model { id: String },
+    Claude,
     TelegramToken,
 }
 
@@ -120,8 +119,7 @@ fn run_check(what: CheckCmd) -> ExitCode {
     let ctx = Ctx::from_env();
     print_check(match what {
         CheckCmd::Folder { path } => setup::check_folder(&ctx, &path),
-        CheckCmd::ApiKey => setup::check_api_key(&ctx),
-        CheckCmd::Model { id } => setup::check_model(&ctx, &id),
+        CheckCmd::Claude => setup::check_claude(&ctx),
         CheckCmd::TelegramToken => setup::check_telegram_token(&ctx),
     })
 }

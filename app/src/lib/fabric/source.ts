@@ -2,7 +2,7 @@ import { isoNow } from './answer';
 import { parseRecord } from './parse';
 import { serializeRecord } from './serialize';
 import { SECTION_KEYS, FROZEN_MESSAGE, isEditable } from './sections';
-import { NO_AUTHOR, SCHEMA, STEPS, type TaskRecord } from './types';
+import { NO_AUTHOR, NO_SESSIONS, SCHEMA, STEPS, type TaskRecord } from './types';
 
 export interface RawRecord { path: string; text: string }
 
@@ -69,7 +69,7 @@ export function newRecord(id: string, f: CreateFields, now: Date = new Date()): 
   return {
     schema: SCHEMA, id, source: null, title: f.title.trim(), due: f.due || null, pri: f.pri ?? 0, state: 'reminder', step: null, waiting: false, needs: null, paused: false, suspended: false, suspend_until: null,
     created_at: at, updated_at: at, requests: { delegate: false, cancel: false, redelegate: false, pause: false, resume: false, complete: false, redo: null },
-    question: null, answers: [], grants: { requested: [], granted: [] }, plan_meta: null, assertions: [], by: { ...NO_AUTHOR },
+    question: null, answers: [], grants: { requested: [], granted: [] }, plan_meta: null, assertions: [], by: { ...NO_AUTHOR }, sessions: { ...NO_SESSIONS },
     approval: null, verdict: null, cost_usd: 0, links: { redelegated_from: null, redelegated_to: null },
     sections: { context: (f.context ?? '').trim(), spec: (f.spec ?? '').trim(), success: (f.success ?? '').trim(), plan: '', log: '', logEntries: [] },
   };

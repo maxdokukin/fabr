@@ -8,7 +8,7 @@ use crate::settings::Settings;
 use crate::setup::{self, CheckReq, Ctx, LinkReq, SecretsWriteReq, SettingsWriteReq};
 use crate::sources::Source;
 use crate::workspace::{RemoteCreateReq, RemoteSourceReq, RemoteWriteReq, Workspace};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +29,13 @@ pub enum Desktop {
     OpenPath(NodeRef),
     Reveal(RevealPathReq),
     OpenUrl(OpenUrlReq),
+    OpenSession(OpenSessionReq),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenSessionReq {
+    pub folder: String,
+    pub session_id: String,
 }
 
 #[derive(Debug)]
@@ -96,11 +103,51 @@ ops! {
     open_path Post true (NodeRef) |_, r| Ok(Done::Desktop(Desktop::OpenPath(r)));
     reveal_path Post true (RevealPathReq) |_, r| Ok(Done::Desktop(Desktop::Reveal(r)));
     open_url Post false (OpenUrlReq) |_, r| Ok(Done::Desktop(Desktop::OpenUrl(r)));
+    fabric_open_session Post false (OpenSessionReq) |_, r| Ok(Done::Desktop(Desktop::OpenSession(r)));
 }
 
 pub fn url_allowed(u: &str) -> bool {
     let l = u.to_ascii_lowercase();
     (l.starts_with("http://") || l.starts_with("https://")) && !u.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+pub fn quote_sh(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+pub fn session_command(req: &OpenSessionReq) -> Result<String, FabrError> {
+    let id = req.session_id.as_str();
+    if id.is_empty() || id.len() > 64 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err(FabrError::BadRequest("that is not a session id".into()));
+    }
+    let dir = std::path::Path::new(&req.folder);
+    if !dir.is_absolute() || !dir.is_dir() {
+        return Err(FabrError::BadRequest(format!("{} is not a folder on this computer", req.folder)));
+    }
+    Ok(format!("cd {} && claude --resume {id}", quote_sh(&req.folder)))
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    fn req(folder: &str, id: &str) -> OpenSessionReq {
+        OpenSessionReq { folder: folder.into(), session_id: id.into() }
+    }
+
+    #[test]
+    fn command_quotes_the_folder_and_checks_the_id() {
+        let d = tempfile::tempdir().unwrap();
+        let odd = d.path().join("it's here");
+        std::fs::create_dir(&odd).unwrap();
+        let cmd = session_command(&req(odd.to_str().unwrap(), "3f2b8c1e-4d5a")).unwrap();
+        assert_eq!(cmd, format!("cd '{}' && claude --resume 3f2b8c1e-4d5a", odd.to_str().unwrap().replace('\'', "'\\''")));
+        for bad in ["", "a b", "x;rm -rf ~", "$(id)", "a'b"] {
+            assert!(session_command(&req(d.path().to_str().unwrap(), bad)).is_err(), "{bad}");
+        }
+        assert!(session_command(&req("relative", "abc")).is_err());
+        assert!(session_command(&req(d.path().join("nope").to_str().unwrap(), "abc")).is_err());
+    }
 }
 
 #[cfg(test)]

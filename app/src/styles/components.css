@@ -606,3 +606,4 @@ input.mrow__key { text-transform: none; color: var(--label); }
 .row__tick { all: unset; box-sizing: border-box; flex: none; display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; color: var(--green); cursor: pointer; }
 .row__tick:hover { background: var(--fill-3); }
 .row--warn { color: var(--orange); font-size: var(--fs-12); gap: 4px; }
+select.row-input { cursor: pointer; text-align-last: right; }

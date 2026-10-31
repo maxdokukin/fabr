@@ -1,7 +1,7 @@
 import { createApi } from '../api/index';
 import type { FabricCheckKind, FabricCheckResult, FabricSecretsStatus, FabricSecretsWriteReq, FabricSettings, FabricSettingsRead } from '../api/types';
 
-export interface CheckArgs { path?: string; model?: string }
+export interface CheckArgs { path?: string }
 
 export interface SetupSource {
   readSettings(): Promise<FabricSettingsRead>;
@@ -33,15 +33,15 @@ export type StubKey = FabricCheckKind | 'telegram_link';
 
 export function emptySettings(): FabricSettings {
   return {
-    default_folder: '', model: 'claude-sonnet-5-5', telegram_user_id: null, auto_mode: false,
+    default_folder: '', model: '', telegram_user_id: null, auto_mode: false,
     question_budget: 5, heartbeat_interval_s: 10, execute: 'full', capabilities: { tools: [], checks: [] }, setup: { completed_steps: [], completed: false },
+    claude_bin: '', effort: '',
   };
 }
 
 const OK: Record<StubKey, FabricCheckResult> = {
   folder: { ok: true },
-  api_key: { ok: true },
-  model: { ok: true, reply: 'Hello.' },
+  claude: { ok: true, version: '2.1.287 (Claude Code)', path: '/usr/local/bin/claude' },
   telegram_token: { ok: true, bot_name: 'test_bot' },
   telegram_link: { ok: true, user_id: 123456789 },
 };
@@ -49,7 +49,7 @@ const OK: Record<StubKey, FabricCheckResult> = {
 export class StubSetupSource implements SetupSource {
   settings: FabricSettings;
   exists: boolean;
-  secrets: FabricSecretsStatus = { anthropic_api_key: false, telegram_bot_token: false };
+  secrets: FabricSecretsStatus = { telegram_bot_token: false };
   outcomes: Partial<Record<StubKey, FabricCheckResult>>;
   delayMs: number;
   calls: string[] = [];
@@ -73,10 +73,6 @@ export class StubSetupSource implements SetupSource {
   }
   async writeSecrets(partial: FabricSecretsWriteReq) {
     this.calls.push('writeSecrets');
-    if (partial.anthropic_api_key) {
-      this.secrets.anthropic_api_key = true;
-      this.secrets.anthropic_api_key_fingerprint = fingerprint(partial.anthropic_api_key.trim());
-    }
     if (partial.telegram_bot_token) {
       this.secrets.telegram_bot_token = true;
       this.secrets.telegram_bot_token_fingerprint = fingerprint(partial.telegram_bot_token.trim());

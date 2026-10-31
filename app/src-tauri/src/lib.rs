@@ -1,7 +1,7 @@
 mod agent;
 
 use agent::AgentHost;
-use fabr_core::ops::{Desktop, Done, dispatch, url_allowed};
+use fabr_core::ops::{Desktop, Done, dispatch, session_command, url_allowed};
 use fabr_core::workspace::Workspace;
 use fabr_core::{AppDirs, ErrorDto, FabrError, client_error};
 use tauri::{Manager, RunEvent, State};
@@ -18,6 +18,7 @@ fn effect(ws: &Workspace, d: Desktop) -> Result<(), FabrError> {
             }
             tauri_plugin_opener::reveal_item_in_dir(p).map_err(io)
         }
+        Desktop::OpenSession(r) => open_terminal(&session_command(&r)?),
         Desktop::OpenUrl(r) => {
             let u = r.url.trim();
             if !url_allowed(u) {
@@ -26,6 +27,29 @@ fn effect(ws: &Workspace, d: Desktop) -> Result<(), FabrError> {
             tauri_plugin_opener::open_url(u, None::<&str>).map_err(io)
         }
     }
+}
+
+fn open_terminal(cmd: &str) -> Result<(), FabrError> {
+    use std::process::{Command, Stdio};
+    let quiet = |c: &mut Command| c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    if cfg!(target_os = "macos") {
+        let script = format!("tell application \"Terminal\" to do script \"{}\"", cmd.replace('\\', "\\\\").replace('"', "\\\""));
+        let ok = quiet(Command::new("osascript").args(["-e", &script, "-e", "tell application \"Terminal\" to activate"]));
+        return if ok { Ok(()) } else { Err(FabrError::Io("Could not open Terminal. Copy the command and run it yourself.".into())) };
+    }
+    let hold = format!("{cmd}; exec \"${{SHELL:-sh}}\"");
+    let tries: [(&str, Vec<&str>); 4] = [
+        ("x-terminal-emulator", vec!["-e", "sh", "-c", &hold]),
+        ("gnome-terminal", vec!["--", "sh", "-c", &hold]),
+        ("konsole", vec!["-e", "sh", "-c", &hold]),
+        ("xterm", vec!["-e", "sh", "-c", &hold]),
+    ];
+    for (bin, args) in tries {
+        if Command::new(bin).args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().is_ok() {
+            return Ok(());
+        }
+    }
+    Err(FabrError::Io("No terminal program was found. Copy the command and run it yourself.".into()))
 }
 
 #[tauri::command(rename_all = "snake_case", async)]

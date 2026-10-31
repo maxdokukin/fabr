@@ -78,7 +78,7 @@ describe('AddFlow', () => {
     flow.ask();
     await flow.finish({ title: 'Pay rent', due: '2026-11-01T09:30', pri: 2, context: 'ctx' }, false);
     const [h] = fabric.tasksFor(FOLDER);
-    expect(h.record).toMatchObject({ state: 'reminder', title: 'Pay rent', due: '2026-11-01T09:30', pri: 2, schema: 6 });
+    expect(h.record).toMatchObject({ state: 'reminder', title: 'Pay rent', due: '2026-11-01T09:30', pri: 2, schema: 7 });
     expect(h.record.requests.delegate).toBe(false);
     expect(h.text).toMatch(/^pri: 2$/m);
     expect(flow.sheet).toBe(false);
@@ -124,7 +124,7 @@ describe('mark done', () => {
     await fabric.markDone(h.path);
     expect(writes).toHaveBeenCalledTimes(1);
     const sent = parseRecord(writes.mock.calls[0][1]);
-    expect(sent).toMatchObject({ state: 'succeeded', title: 'Pay rent', pri: 3, schema: 6 });
+    expect(sent).toMatchObject({ state: 'succeeded', title: 'Pay rent', pri: 3, schema: 7 });
     expect(sent.sections.log).toBe('');
     const after = fabric.tasksFor(FOLDER)[0].record;
     expect(after.state).toBe('succeeded');
@@ -305,7 +305,7 @@ describe('pause and suspend through the store', () => {
     await fabric.pause(run.path);
     const after = parseRecord(await source.readRecord(run.path));
     expect(after.requests).toEqual({ ...run.record.requests, pause: true });
-    expect({ ...after, updated_at: '', requests: run.record.requests }).toEqual({ ...run.record, schema: 6, updated_at: '' });
+    expect({ ...after, updated_at: '', requests: run.record.requests }).toEqual({ ...run.record, schema: 7, updated_at: '' });
     await expect(fabric.resume(run.path)).rejects.toThrow(/paused/);
   });
   it('Suspend writes suspended and suspend_until, Unsuspend clears them; a paused flip is refused', async () => {
@@ -330,7 +330,7 @@ describe('mark done before the agent finishes', () => {
     expect(writes).toHaveBeenCalledTimes(1);
     const sent = parseRecord(writes.mock.calls[0][1]);
     expect(sent).toMatchObject({ state: 'in_progress', step: run.record.step, requests: { complete: true } });
-    expect({ ...sent, requests: run.record.requests, updated_at: '' }).toEqual({ ...run.record, schema: 6, updated_at: '', sections: sent.sections });
+    expect({ ...sent, requests: run.record.requests, updated_at: '' }).toEqual({ ...run.record, schema: 7, updated_at: '', sections: sent.sections });
     await fabric.createTask(FOLDER, { title: 'Pay rent' });
     await fabric.complete(fabric.tasksFor(FOLDER).find((h) => h.record.title === 'Pay rent')!);
     expect(fabric.tasksFor(FOLDER).find((h) => h.record.title === 'Pay rent')!.record.state).toBe('succeeded');
@@ -338,10 +338,10 @@ describe('mark done before the agent finishes', () => {
 
   it('schema 4 parses with complete false and serializes as schema 5', async () => {
     const { fabric } = await fresh();
-    const text = serializeRecord(fabric.records[0].record).replace(/^schema: 6$/m, 'schema: 4').replace(', complete: false, redo: null', '');
+    const text = serializeRecord(fabric.records[0].record).replace(/^schema: 7$/m, 'schema: 4').replace(', complete: false, redo: null', '');
     const r = parseRecord(text);
     expect(r.requests.complete).toBe(false);
-    expect(serializeRecord(r)).toMatch(/^schema: 6$/m);
+    expect(serializeRecord(r)).toMatch(/^schema: 7$/m);
     expect(serializeRecord(r)).toContain('resume: false, complete: false, redo: null}');
   });
 

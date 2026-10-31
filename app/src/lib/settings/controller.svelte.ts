@@ -9,11 +9,11 @@ import { SshFlow } from './sshflow.svelte';
 import { advancedToText, validateAdvanced, type AdvField, type AdvancedText } from './units';
 
 export type Page =
-  | { kind: 'root' | 'appearance' | 'sources' | 'advanced' | 'keys' | 'api' | 'telegram' }
+  | { kind: 'root' | 'appearance' | 'sources' | 'advanced' | 'keys' | 'claude' | 'telegram' }
   | { kind: 'source'; uid: number };
 
 export const PAGE_TITLES: Record<Exclude<Page['kind'], 'source'>, string> = {
-  root: 'Settings', appearance: 'Appearance', sources: 'Sources', advanced: 'Advanced', keys: 'Keyboard shortcuts', api: 'API', telegram: 'Telegram',
+  root: 'Settings', appearance: 'Appearance', sources: 'Sources', advanced: 'Advanced', keys: 'Keyboard shortcuts', claude: 'Claude Code', telegram: 'Telegram',
 };
 
 let nextUid = 1;

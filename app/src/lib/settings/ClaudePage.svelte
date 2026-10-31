@@ -4,15 +4,16 @@
   import NumField from '../ui/NumField.svelte';
   import Row from '../ui/Row.svelte';
   import Segmented from '../ui/Segmented.svelte';
+  import ClaudeFields from '../setup/ClaudeFields.svelte';
   import Switch from '../ui/Switch.svelte';
-  import { MODELS } from '../setup/wizard';
-  import type { ExecuteMode } from '../api/types';
+    import type { ExecuteMode } from '../api/types';
   import type { SettingsController } from './controller.svelte';
 
   let { ctl }: { ctl: SettingsController } = $props();
   const p = $derived(ctl.setup);
-  let secret = $state('');
-  let model = $state(MODELS[0].value);
+  let bin = $state('');
+  let model = $state('');
+  let effort = $state('');
   let auto = $state(false);
   let execute = $state<ExecuteMode>('full');
   const MODES: { value: ExecuteMode; label: string }[] = [{ value: 'full', label: 'Full' }, { value: 'read_only', label: 'Read-only' }, { value: 'off', label: 'Off' }];
@@ -20,36 +21,25 @@
 
   onMount(async () => {
     await p.load();
-    model = p.settings?.model ?? MODELS[0].value;
+    bin = p.settings?.claude_bin ?? '';
+    model = p.settings?.model ?? '';
+    effort = p.settings?.effort ?? '';
     auto = p.settings?.auto_mode ?? false;
     execute = p.settings?.execute ?? 'full';
   });
 
-  async function save() {
-    if (await p.saveSecret('anthropic_api_key', secret)) secret = '';
+  async function check() {
+    await p.testClaude(bin);
+    if (p.results.claude?.ok) await p.write({ claude_bin: bin.trim() });
   }
 </script>
 
-<Group header="Anthropic key" footer="Stored on this computer. Only the start and end of the key are shown.">
-  <Row label="Saved key" value={p.keySaved ? p.keyFingerprint : 'none'} />
-  <Row label="Replace with">
-    <input class="row-input" type="password" bind:value={secret} placeholder="sk-ant-..." autocomplete="off" spellcheck="false" />
-  </Row>
-  <Row label={p.busy === 'save' ? 'Saving…' : 'Save key'} tone="tint" disabled={!secret.trim() || p.busy !== null} onclick={save} />
-  <Row label={p.busy === 'key' ? 'Testing…' : 'Test key'} tone="tint" disabled={!p.keySaved || p.busy !== null} onclick={() => p.testKey()} />
-  {#if p.results.key}
+<Group header="Claude Code" footer="Fabr runs your tasks with the Claude Code program on this computer. Leave the program empty to find it automatically.">
+  <ClaudeFields bind:bin bind:model bind:effort onbin={() => delete p.results.claude} onpick={() => p.write({ model, effort })} />
+  <Row label={p.busy === 'claude' ? 'Checking…' : 'Check'} tone="tint" disabled={p.busy !== null} onclick={check} />
+  {#if p.results.claude}
     <Row label="Result" wrap>
-      <span class="row-result" class:row-result--bad={!p.results.key.ok}><span class="row-dot" class:row-dot--ok={p.results.key.ok} class:row-dot--error={!p.results.key.ok}></span>{p.results.key.text}</span>
-    </Row>
-  {/if}
-</Group>
-
-<Group header="Model">
-  <Row label="Model"><Segmented label="Model" options={MODELS} bind:value={model} onchange={(m) => p.write({ model: m })} /></Row>
-  <Row label={p.busy === 'model' ? 'Testing…' : 'Test model'} tone="tint" disabled={!p.keySaved || p.busy !== null} onclick={() => p.testModel(model)} />
-  {#if p.results.model}
-    <Row label="Result" wrap>
-      <span class="row-result" class:row-result--bad={!p.results.model.ok}><span class="row-dot" class:row-dot--ok={p.results.model.ok} class:row-dot--error={!p.results.model.ok}></span>{p.results.model.text}</span>
+      <span class="row-result" class:row-result--bad={!p.results.claude.ok}><span class="row-dot" class:row-dot--ok={p.results.claude.ok} class:row-dot--error={!p.results.claude.ok}></span>{p.results.claude.text}</span>
     </Row>
   {/if}
 </Group>

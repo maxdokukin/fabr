@@ -65,7 +65,7 @@ describe('mock api', () => {
     const done = serializeRecord({ ...rec, state: 'succeeded', updated_at: '2030-01-01T00:00:00Z' });
     await api.fabricWrite({ path: rem.path, text: done, expected_updated_at: rec.updated_at });
     const after = parseRecord((await api.fabricRead(rem.path)).text);
-    expect(after).toMatchObject({ state: 'succeeded', schema: 6 });
+    expect(after).toMatchObject({ state: 'succeeded', schema: 7 });
     expect(after.sections.logEntries.at(-1)?.message).toMatch(/done by hand/);
     const run = await read('05-running');
     const forged = serializeRecord({ ...parseRecord(run.text), state: 'succeeded' });
@@ -77,20 +77,20 @@ describe('mock api', () => {
     expect(Object.keys(createMockApi({ latency: 0 })).sort()).toEqual(Object.keys(COMMANDS).sort());
   });
 
-  it('completing all five setup steps flips setup.completed', async () => {
+  it('completing the folder and Claude Code steps flips setup.completed', async () => {
     const api = createMockApi({ latency: 0 });
     const first = await api.fabricSettingsRead();
     expect([first.exists, first.settings.setup.completed]).toEqual([false, false]);
     let cur = first.settings;
-    for (const step of ['folder', 'api_key', 'model', 'telegram_bot', 'telegram_link'] as const) {
+    for (const step of ['folder', 'claude'] as const) {
       cur = markStep(cur, step);
       const r = await api.fabricSettingsWrite(cur);
-      expect(r.settings.setup.completed).toBe(step === 'telegram_link');
+      expect(r.settings.setup.completed).toBe(step === 'claude');
     }
     expect(await api.fabricSettingsRead()).toMatchObject({ exists: true, settings: { setup: { completed: true } } });
   });
 
-  it('a fresh config opens on setup and the five steps open tasks', async () => {
+  it('a fresh config opens on setup and the two required steps open tasks', async () => {
     const { shouldShowSetup } = await import('../lib/setup/gate');
     const { ApiSetupSource } = await import('../lib/setup/setup-source');
     const api = createMockApi({ today: '2026-10-19', latency: 0 });
@@ -99,12 +99,10 @@ describe('mock api', () => {
     expect(shouldShowSetup(read)).toBe(true);
     const src = new ApiSetupSource(api);
     let s = read.settings;
-    for (const [step, kind] of [['folder', 'folder'], ['api_key', 'api_key'], ['model', 'model'], ['telegram_bot', 'telegram_token']] as const) {
+    for (const [step, kind] of [['folder', 'folder'], ['claude', 'claude']] as const) {
       expect((await src.check(kind, { path: '~/' })).ok).toBe(true);
       s = markStep(s, step);
     }
-    expect((await src.telegramLink(5)).ok).toBe(true);
-    s = markStep(s, 'telegram_link');
     expect(shouldShowSetup(await src.writeSettings(s))).toBe(false);
     expect(shouldShowSetup(await api.fabricSettingsRead())).toBe(false);
   });
