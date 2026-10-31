@@ -43,6 +43,7 @@ pub fn merge(disk: &mut TaskRecord, base: &TaskRecord, mine: &TaskRecord) {
     take(&mut disk.verdict, &base.verdict, &mine.verdict);
     take(&mut disk.cost_usd, &base.cost_usd, &mine.cost_usd);
     take(&mut disk.links, &base.links, &mine.links);
+    take(&mut disk.sessions, &base.sessions, &mine.sessions);
     take_section(&mut disk.context, &mut disk.by.context, (&base.context, base.by.context), (&mine.context, mine.by.context));
     take_section(&mut disk.spec, &mut disk.by.spec, (&base.spec, base.by.spec), (&mine.spec, mine.by.spec));
     take_section(&mut disk.success, &mut disk.by.success, (&base.success, base.by.success), (&mine.success, mine.by.success));

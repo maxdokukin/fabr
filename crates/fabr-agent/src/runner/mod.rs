@@ -4,16 +4,16 @@ pub(crate) mod heartbeat;
 mod registry;
 mod signal;
 
-pub use calls::{CallLog, Sink, StepUsage, cost_usd};
+pub use calls::{CallLog, Sink, StepUsage};
 pub(crate) use heartbeat::write_atomic;
 pub use heartbeat::write_failure;
-pub use signal::install as install_signals;
+pub use signal::{install as install_signals, stopping};
 
 use crate::board::{Activity, Board, Extras};
+use crate::claude::{ClaudeEngine, resolve_bin};
 use crate::lifecycle::{Ctl, advance_with, apply_redo, task_path_key, trailing_error};
-use crate::model::AnthropicModel;
 use crate::now_utc;
-use crate::settings::check_timeout_s;
+use crate::settings::{check_timeout_s, execute_timeout_s};
 use crate::state::{
     append_log, clean_message, driven, is_terminal, parked, pending_tail, stage_label, state_name, suspend_expired, suspended_now,
 };
@@ -21,10 +21,10 @@ use crate::store::mutate;
 use chrono::Utc;
 use events::Events;
 use fabr_core::fabric::{self, FabricListReq};
-use fabr_core::redact::{fingerprint, register_secret};
+use fabr_core::redact::register_secret;
 use fabr_core::setup::{Ctx, ExecuteMode, read_secret, settings_read};
 use fabr_core::taskrec::{Grants, Links, Requests, State, TaskRecord, parse, write_record};
-use fabr_core::{FabrError, Secret, Workspace};
+use fabr_core::{FabrError, Workspace};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -32,6 +32,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 const RETRY_AFTER_TICKS: u64 = 6;
+const BOT_POLL_S: u64 = 3;
 const RETRY_CAP_S: u64 = 600;
 const FRESH_EVENT_WINDOW_S: i64 = 24 * 3600;
 
@@ -43,8 +44,9 @@ pub struct Options {
 
 pub struct Gate {
     pub default_folder: PathBuf,
+    pub claude_bin: PathBuf,
     pub model: String,
-    pub key: Secret,
+    pub effort: String,
     pub heartbeat_interval_s: u64,
 }
 
@@ -57,27 +59,33 @@ pub fn start_gate(ctx: &Ctx) -> Result<Gate, FabrError> {
     if !read.settings.setup.completed {
         return refuse("Setup is not complete, so finish the setup screens in the app before starting the agent.");
     }
-    let Some(key) = read_secret(ctx, "anthropic_api_key") else {
-        return refuse("No Anthropic API key is saved, so enter it in the app's setup first.");
-    };
-    if read.settings.model.trim().is_empty() {
-        return refuse("No model is selected, so pick one in the app's setup first.");
-    }
     let folder = PathBuf::from(&read.settings.default_folder);
+    if read.settings.default_folder.trim().is_empty() {
+        return refuse("No default folder is set, so pick one in the app's setup first.");
+    }
     if !folder.is_dir() {
         return Err(FabrError::BadRequest(format!(
             "The default folder {} does not exist, so pick another one in setup.",
             folder.display()
         )));
     }
-    register_secret(&key, &fingerprint(&key));
+    let Some(claude_bin) = resolve_bin(&read.settings.claude_bin) else {
+        let named = read.settings.claude_bin.trim();
+        return Err(FabrError::BadRequest(if named.is_empty() {
+            "Claude Code was not found on PATH, so install it (the claude command) or set claude_bin in settings.toml to its full path."
+                .into()
+        } else {
+            format!("Claude Code was not found at {named}, so fix claude_bin in settings.toml or clear it to use claude from PATH.")
+        }));
+    };
     if let Some(token) = read_secret(ctx, "telegram_bot_token") {
         register_secret(&token, "[bot token]");
     }
     Ok(Gate {
         default_folder: folder,
+        claude_bin,
         model: read.settings.model.trim().to_string(),
-        key: Secret::new(key),
+        effort: read.settings.effort.trim().to_string(),
         heartbeat_interval_s: u64::from(read.settings.heartbeat_interval_s).clamp(1, 60),
     })
 }
@@ -85,15 +93,12 @@ pub fn start_gate(ctx: &Ctx) -> Result<Gate, FabrError> {
 pub struct Runner {
     space: PathBuf,
     root: PathBuf,
-    model: AnthropicModel,
-    calls: Arc<CallLog>,
+    engine: ClaudeEngine,
     board: Arc<Board>,
     ctl: Ctl,
     opts: Options,
     sink: Sink,
     events: Events,
-    gate_model: String,
-    fingerprint: String,
     hb_interval_s: u64,
     retry_base_s: u64,
     beating: Option<heartbeat::Beating>,
@@ -104,33 +109,32 @@ pub struct Runner {
     bad_records: HashSet<PathBuf>,
     suspended_seen: HashSet<PathBuf>,
     known: HashSet<PathBuf>,
+    bot: Option<fabr_core::telegram::Bot>,
+    polled_at: Option<std::time::Instant>,
 }
 
 impl Runner {
     pub fn new(ctx: &Ctx, _ws: Workspace, opts: Options, sink: Sink) -> Result<Runner, FabrError> {
         let gate = start_gate(ctx)?;
-        let fp = fingerprint(gate.key.expose());
-        let calls = CallLog::new(sink.clone(), fp.clone());
-        let model =
-            AnthropicModel::new(gate.key.clone(), gate.model.clone()).with_base_url(&ctx.anthropic_url).with_observer(calls.observer());
+        let calls = CallLog::new(sink.clone(), gate.model.clone());
         let space = ctx.space();
-        let board = Board::new(&space, gate.heartbeat_interval_s, Some(calls.clone()));
+        let engine = ClaudeEngine::new(&gate.claude_bin)
+            .with_model(&gate.model, &gate.effort)
+            .with_timeout(Duration::from_secs(execute_timeout_s(&space)));
+        let board = Board::new(&space, gate.heartbeat_interval_s, Some(calls));
         let mut ctl = Ctl::with_board(board.clone(), check_timeout_s(&space));
         ctl.harness = crate::caps::load(ctx)?;
-        (ctl.execute_max_turns, ctl.evaluate_max_reads) = crate::settings::limits(&space);
+        ctl.root = Some(gate.default_folder.clone());
         Ok(Runner {
             events: Events::new(&space),
             space,
             root: gate.default_folder,
-            model,
-            calls,
+            engine,
             board,
             ctl,
             retry_base_s: opts.interval_s.max(1) * RETRY_AFTER_TICKS,
             opts,
             sink,
-            gate_model: gate.model,
-            fingerprint: fp,
             hb_interval_s: gate.heartbeat_interval_s,
             beating: None,
             emitted: HashSet::new(),
@@ -140,6 +144,8 @@ impl Runner {
             bad_records: HashSet::new(),
             suspended_seen: HashSet::new(),
             known: HashSet::new(),
+            bot: fabr_core::telegram::Bot::from_ctx(ctx),
+            polled_at: None,
         })
     }
 
@@ -148,8 +154,8 @@ impl Runner {
         self
     }
 
-    pub fn with_model_retry_base(mut self, base: Duration) -> Runner {
-        self.model = self.model.with_retry_base(base);
+    pub fn with_engine_timeout(mut self, timeout: Duration) -> Runner {
+        self.engine = self.engine.with_timeout(timeout);
         self
     }
 
@@ -166,11 +172,13 @@ impl Runner {
             eff.tools.join(","),
             eff.checks.join(",")
         ));
+        let or_default = |s: &str| if s.is_empty() { "default".to_string() } else { s.to_string() };
         self.sink.info(format!(
-            "agent starting: default_folder={} model={} key={} interval={}s heartbeat={}s",
+            "agent starting: default_folder={} claude={} model={} effort={} interval={}s heartbeat={}s",
             self.root.display(),
-            self.gate_model,
-            self.fingerprint,
+            self.engine.bin.display(),
+            or_default(&self.engine.model),
+            or_default(&self.engine.effort),
             self.opts.interval_s,
             self.hb_interval_s
         ));
@@ -229,10 +237,27 @@ impl Runner {
         }
     }
 
-    fn emit(&self, kind: &str, task_path: &str, detail: &str) {
+    fn emit(&mut self, kind: &str, task_path: &str, detail: &str) {
         match self.events.append(kind, task_path, detail) {
             Ok(()) => self.sink.info(format!("event {kind} {task_path}")),
             Err(e) => self.sink.warn(format!("events.log append failed: {e}")),
+        }
+        if let Some(bot) = self.bot.as_mut()
+            && kind != "waiting"
+        {
+            let title = std::fs::read_to_string(task_path).ok().and_then(|t| parse(&t).ok()).map(|r| r.title).unwrap_or_default();
+            bot.notify_event(kind, Path::new(task_path), &title, detail);
+        }
+    }
+
+    fn poll_bot(&mut self) {
+        let due = self.polled_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(BOT_POLL_S));
+        let Some(bot) = self.bot.as_mut().filter(|_| due) else { return };
+        self.polled_at = Some(std::time::Instant::now());
+        match bot.poll() {
+            Ok(0) => {}
+            Ok(n) => self.sink.info(format!("telegram: {n} update{} applied", if n == 1 { "" } else { "s" })),
+            Err(e) => self.sink.warn(format!("telegram poll failed: {}", e.message())),
         }
     }
 
@@ -270,6 +295,7 @@ impl Runner {
                 self.emit("stuck", &entry.task_path, &format!("agent stopped answering ({age})"));
             }
         }
+        self.poll_bot();
         if self.ctl.harness.mode == ExecuteMode::Off {
             return;
         }
@@ -393,15 +419,7 @@ impl Runner {
             if let Some((left, message)) = self.retry_hold(&rec) {
                 extras = Some(Extras { activity: Some(Activity::Retry), retry_in_s: Some(left), last_error: Some(message) });
             } else {
-                self.calls.begin(&rec.id);
-                let r = self.drive(path, &node_dir);
-                let cost = self.calls.take_cost();
-                if cost > 0.0
-                    && let Err(e) = mutate(path, |r| r.cost_usd += cost)
-                {
-                    self.sink.warn(format!("could not record cost on {}: {}", rec.id, e.message()));
-                }
-                if let Err(e) = r {
+                if let Err(e) = self.drive(path, &node_dir) {
                     self.sink.warn(format!("{} stopped at {}: {}", rec.id, step_text(&rec), e.message()));
                     if let Some(now) = self.load(path)
                         && let Some(err) = trailing_error(&now.log, stage_label(&now))
@@ -418,6 +436,11 @@ impl Runner {
         }
         let Some(rec) = (if drive_it { self.control(path) } else { self.load(path) }) else { return };
         self.sync(path, &node_dir, &rec, extras);
+        if let Some(bot) = self.bot.as_mut()
+            && let Err(e) = bot.sync_record(path, &rec)
+        {
+            self.sink.warn(format!("telegram send failed for {}: {}", rec.id, e.message()));
+        }
         let task = task_path_key(path);
         for ev in event_keys(path, &rec) {
             if self.emitted.insert(ev.dedupe) {
@@ -507,7 +530,7 @@ impl Runner {
             if parked(&rec) || rec.paused || rec.requests.pause || suspended_now(&rec) {
                 break;
             }
-            advance_with(node_dir, path, &self.ctl, &self.model)?;
+            advance_with(node_dir, path, &self.ctl, &self.engine)?;
             let after = std::fs::read_to_string(path).map_err(|e| FabrError::Io(e.to_string()))?;
             if after == before {
                 break;
@@ -657,7 +680,8 @@ fn fold_answer(path: &Path) -> Result<(), FabrError> {
             let id = q.id.clone();
             r.answers.push(q);
             r.waiting = r.state == State::Defined && r.approval.as_ref().is_some_and(|a| a.status == "pending");
-            append_log(&mut r.log, "define", &format!("answered {id}"));
+            let label = stage_label(r);
+            append_log(&mut r.log, label, &format!("answered {id}"));
         }
     })
     .map(|_| ())

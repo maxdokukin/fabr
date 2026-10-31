@@ -132,6 +132,7 @@ impl AgentHost {
             }
         };
         let stop = Arc::new(AtomicBool::new(false));
+        fabr_agent::claude::allow_runs();
         let (flag, reason, backoff) = (stop.clone(), self.reason.clone(), self.restart_backoff);
         let (finished, done) = channel::<()>();
         let spawned = std::thread::Builder::new().name("fabr-agent".into()).spawn(move || {
@@ -150,6 +151,7 @@ impl AgentHost {
         let live = self.live.lock().unwrap_or_else(PoisonError::into_inner).take();
         if let Some(l) = live {
             l.stop.store(true, Ordering::SeqCst);
+            fabr_agent::claude::abort_all();
             if l.done.recv_timeout(self.stop_wait).is_ok() {
                 let _ = l.handle.join();
             } else {
@@ -182,12 +184,7 @@ mod tests {
         assert!(s.reason.unwrap().contains("Setup has not been started"));
 
         std::fs::create_dir_all(ctx.space()).unwrap();
-        std::fs::write(
-            ctx.settings_path(),
-            format!("default_folder = \"{}\"\nmodel = \"claude-sonnet-5-5\"\n\n[setup]\ncompleted = true\n", folder.display()),
-        )
-        .unwrap();
-        std::fs::write(ctx.secrets_path(), "anthropic_api_key = \"sk-ant-fake-test-key\"\n").unwrap();
+        settings(&ctx, &folder);
 
         let s = host.start(ctx.clone(), ws);
         assert_eq!(s, Status { running: true, reason: None });
@@ -210,13 +207,27 @@ mod tests {
         std::fs::create_dir_all(&folder).unwrap();
         let ctx = Ctx::new(dir);
         std::fs::create_dir_all(ctx.space()).unwrap();
+        settings(&ctx, &folder);
+        (ctx, folder)
+    }
+
+    fn settings(ctx: &Ctx, folder: &std::path::Path) {
+        let claude = ctx.home.join("fake-claude");
+        std::fs::write(&claude, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         std::fs::write(
             ctx.settings_path(),
-            format!("default_folder = \"{}\"\nmodel = \"claude-sonnet-5-5\"\n\n[setup]\ncompleted = true\n", folder.display()),
+            format!(
+                "default_folder = \"{}\"\nmodel = \"haiku\"\nclaude_bin = \"{}\"\n\n[setup]\ncompleted = true\n",
+                folder.display(),
+                claude.display()
+            ),
         )
         .unwrap();
-        std::fs::write(ctx.secrets_path(), "anthropic_api_key = \"sk-ant-fake-test-key\"\n").unwrap();
-        (ctx, folder)
     }
 
     fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {

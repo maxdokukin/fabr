@@ -9,7 +9,6 @@ use toml_edit::{Array, DocumentMut, Item, Table, value};
 
 pub const MODELS: [&str; 5] = ["", "sonnet", "opus", "haiku", "fable"];
 pub const EFFORTS: [&str; 6] = ["", "low", "medium", "high", "xhigh", "max"];
-const ANTHROPIC_URL: &str = "https://api.anthropic.com";
 const TELEGRAM_URL: &str = "https://api.telegram.org";
 const NO_MESSAGE: &str = "No message arrived in time. Open your bot in Telegram and send it any text.";
 const NO_CONFIRM: &str = "Confirm was not tapped in time. Tap Confirm under the message from your bot.";
@@ -17,14 +16,13 @@ const NO_CONFIRM: &str = "Confirm was not tapped in time. Tap Confirm under the 
 #[derive(Debug, Clone)]
 pub struct Ctx {
     pub home: PathBuf,
-    pub anthropic_url: String,
     pub telegram_url: String,
     pub poll_s: u64,
 }
 
 impl Ctx {
     pub fn new(home: impl Into<PathBuf>) -> Ctx {
-        Ctx { home: home.into(), anthropic_url: ANTHROPIC_URL.into(), telegram_url: TELEGRAM_URL.into(), poll_s: 10 }
+        Ctx { home: home.into(), telegram_url: TELEGRAM_URL.into(), poll_s: 10 }
     }
 
     pub fn from_env() -> Ctx {
@@ -34,9 +32,6 @@ impl Ctx {
             .or_else(|| directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf()))
             .unwrap_or_else(|| PathBuf::from("."));
         let mut c = Ctx::new(home);
-        if let Some(u) = env("FABR_ANTHROPIC_URL") {
-            c.anthropic_url = u;
-        }
         if let Some(u) = env("FABR_TELEGRAM_URL") {
             c.telegram_url = u;
         }

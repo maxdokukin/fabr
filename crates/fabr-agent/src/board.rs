@@ -1,3 +1,4 @@
+use crate::engine::Usage;
 use crate::now_utc;
 use crate::runner::{CallLog, write_atomic};
 use crate::state::{state_name, step_name, waiting_on};
@@ -126,6 +127,12 @@ impl Board {
         Ok(())
     }
 
+    pub fn spent(&self, task_id: &str, step: &str, session: Option<&str>, usage: &Usage, usd: f64) {
+        if let Some(calls) = &self.calls {
+            calls.record(task_id, step, session, usage, usd);
+        }
+    }
+
     pub fn remove(&self, task_id: &str, task_path: &str) {
         let file = self.file_for(task_id, task_path);
         let mut live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
@@ -174,8 +181,7 @@ impl Board {
         let _ = writeln!(body, "activity: {}", e.extras.activity.map_or("null", Activity::name));
         let _ = writeln!(body, "retry_in_s: {}", e.extras.retry_in_s.map_or("null".to_string(), |n| n.to_string()));
         let _ = writeln!(body, "last_error: {}", e.extras.last_error.as_deref().map_or("null".to_string(), q));
-        let pending = self.calls.as_ref().map_or(0.0, |c| c.pending_cost());
-        let _ = writeln!(body, "cost_usd: {}", format_cost(e.cost_usd + pending));
+        let _ = writeln!(body, "cost_usd: {}", format_cost(e.cost_usd));
         let usage = self.calls.as_ref().map(|c| c.usage(&e.task_id)).unwrap_or_default();
         if usage.is_empty() {
             body.push_str("usage: {}\n");

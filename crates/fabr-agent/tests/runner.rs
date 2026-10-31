@@ -1,3 +1,6 @@
+mod common;
+
+use common::{FakeClaude, define_out, exec_out, ok, plan_out, verdict_out};
 use fabr_agent::runner::{Options, Runner, Sink};
 use fabr_agent::task_path_key;
 use fabr_core::Workspace;
@@ -5,115 +8,41 @@ use fabr_core::fabric::{self, FabricCreateReq};
 use fabr_core::setup::Ctx;
 use fabr_core::taskrec::{self, Answer, State, Step, TaskRecord};
 use serde_json::json;
-use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-const KEY: &str = "sk-ant-api03-FAKEFAKEFAKEFAKEFAKE-x9Qa";
-
-struct Fake {
-    url: String,
-    bodies: Arc<Mutex<Vec<String>>>,
-    questions: Arc<AtomicUsize>,
-    status: Arc<AtomicUsize>,
-    script: Arc<Mutex<VecDeque<u16>>>,
-    cut: Arc<AtomicBool>,
-    stop: Arc<AtomicBool>,
-    handle: Option<std::thread::JoinHandle<()>>,
-}
-
-impl Fake {
-    fn new(questions: usize) -> Fake {
-        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-        let url = format!("http://{}", server.server_addr().to_ip().unwrap());
-        let bodies = Arc::new(Mutex::new(Vec::new()));
-        let questions = Arc::new(AtomicUsize::new(questions));
-        let status = Arc::new(AtomicUsize::new(200));
-        let script = Arc::new(Mutex::new(VecDeque::<u16>::new()));
-        let cut = Arc::new(AtomicBool::new(false));
-        let stop = Arc::new(AtomicBool::new(false));
-        let (b, q, s, st, sc, ct) = (bodies.clone(), questions.clone(), status.clone(), stop.clone(), script.clone(), cut.clone());
-        let handle = std::thread::spawn(move || {
-            while !st.load(Ordering::SeqCst) {
-                let Ok(Some(mut req)) = server.recv_timeout(std::time::Duration::from_millis(50)) else { continue };
-                let mut body = String::new();
-                std::io::Read::read_to_string(req.as_reader(), &mut body).unwrap();
-                b.lock().unwrap().push(body.clone());
-                let code = sc.lock().unwrap().pop_front().unwrap_or(s.load(Ordering::SeqCst) as u16);
-                let text = if code != 200 {
-                    format!("bad key {KEY} in x-api-key: {KEY}")
-                } else if body.contains("keys spec, success, assertions, question") {
-                    let asked = q.load(Ordering::SeqCst) > 0;
-                    if asked {
-                        q.fetch_sub(1, Ordering::SeqCst);
-                    }
-                    let question = if asked { json!("Which filename?") } else { json!(null) };
-                    let inner = json!({"spec": "write greet.md", "success": "greet.md exists", "assertions": [{"id": "a1", "text": "greet.md exists"}], "question": question});
-                    json!({"content": [{"type": "text", "text": inner.to_string()}], "usage": {"input_tokens": 120, "output_tokens": 45}})
-                        .to_string()
-                } else {
-                    let inner = json!({"spec": "write greet.md", "success": "greet.md exists", "plan": "1. write it", "assertions": [{"id": "a1", "text": "greet.md exists"}],
-                        "plan_meta": {"reversibility": "reversible", "tools": ["write_file"], "checks": [{"cmd": "test", "args": ["-f", "greet.md"]}]}});
-                    json!({"content": [{"type": "text", "text": inner.to_string()}], "usage": {"input_tokens": 300, "output_tokens": 80}})
-                        .to_string()
-                };
-                let text = if ct.load(Ordering::SeqCst) && code == 200 {
-                    let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
-                    v["stop_reason"] = json!("max_tokens");
-                    v.to_string()
-                } else {
-                    text
-                };
-                let resp = tiny_http::Response::from_string(text)
-                    .with_status_code(code)
-                    .with_header(tiny_http::Header::from_bytes("content-type", "application/json").unwrap());
-                let _ = req.respond(resp);
-            }
-        });
-        Fake { url, bodies, questions, status, script, cut, stop, handle: Some(handle) }
-    }
-
-    fn calls(&self) -> usize {
-        self.bodies.lock().unwrap().len()
-    }
-}
-
-impl Drop for Fake {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
-    }
-}
+const TOKEN: &str = "123456789:AAFAKEFAKEFAKEFAKEFAKEtoken";
 
 struct Env {
     tmp: tempfile::TempDir,
     ctx: Ctx,
     proj: PathBuf,
+    fake: FakeClaude,
 }
 
-fn env(url: &str, completed: bool, key: Option<&str>, model: &str) -> Env {
+fn env(completed: bool, claude_bin: Option<&str>) -> Env {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
     let proj = home.join("proj");
     std::fs::create_dir_all(&proj).unwrap();
     let space = home.join(".fabric-space");
     std::fs::create_dir_all(&space).unwrap();
+    let fake = FakeClaude::new(tmp.path());
+    let bin = claude_bin.map(str::to_string).unwrap_or_else(|| fake.bin.to_string_lossy().into_owned());
     std::fs::write(
         space.join("settings.toml"),
         format!(
-            "default_folder = \"{}\"\nmodel = \"{model}\"\nheartbeat_interval_s = 10\n\n[setup]\ncompleted_steps = [\"folder\", \"api_key\", \"model\"]\ncompleted = {completed}\n",
+            "default_folder = \"{}\"\nmodel = \"haiku\"\neffort = \"low\"\nclaude_bin = \"{bin}\"\nheartbeat_interval_s = 10\n\n[setup]\ncompleted_steps = [\"folder\", \"model\"]\ncompleted = {completed}\n",
             proj.display()
         ),
     )
     .unwrap();
-    std::fs::write(space.join("secrets.toml"), key.map(|k| format!("anthropic_api_key = \"{k}\"\n")).unwrap_or_default()).unwrap();
-    let mut ctx = Ctx::new(&home);
-    ctx.anthropic_url = url.to_string();
-    Env { tmp, ctx, proj }
+    std::fs::write(space.join("secrets.toml"), format!("telegram_bot_token = \"{TOKEN}\"\n")).unwrap();
+    Env { ctx: Ctx::new(&home), tmp, proj, fake }
+}
+
+fn ready() -> Env {
+    env(true, None)
 }
 
 fn runner(e: &Env) -> (Runner, Arc<Mutex<Vec<String>>>) {
@@ -123,11 +52,7 @@ fn runner(e: &Env) -> (Runner, Arc<Mutex<Vec<String>>>) {
     std::fs::create_dir_all(&cache).unwrap();
     let ws = Workspace::from_config(&cfg, &cache, Some(e.proj.clone())).unwrap();
     let (sink, lines) = Sink::capture();
-    (Runner::new(&e.ctx, ws, Options { interval_s: 5, once: false }, sink).unwrap().with_model_retry_base(Duration::from_millis(1)), lines)
-}
-
-fn ready(fake: &Fake) -> Env {
-    env(&fake.url, true, Some(KEY), "claude-sonnet-5-5")
+    (Runner::new(&e.ctx, ws, Options { interval_s: 5, once: false }, sink).unwrap(), lines)
 }
 
 fn new_record(e: &Env, title: &str) -> PathBuf {
@@ -154,6 +79,27 @@ fn edit(p: &Path, f: impl FnOnce(&mut TaskRecord)) {
     taskrec::write_record(p, &rec, Some(&expected)).unwrap();
 }
 
+fn answer(p: &Path, value: &str) {
+    edit(p, |rec| {
+        rec.question.as_mut().unwrap().answer = Some(Answer {
+            value: Some(value.into()),
+            replacement: None,
+            granted: None,
+            by: Some("gui".into()),
+            at: Some("2026-10-24T18:05:02Z".into()),
+        });
+    });
+}
+
+fn queue_question(e: &Env) {
+    e.fake.push(ok(define_out(Some("Which filename?")), 0.012));
+}
+
+fn queue_plan(e: &Env) {
+    e.fake.push(ok(define_out(None), 0.01));
+    e.fake.push(ok(plan_out(&["Write"]), 0.02));
+}
+
 fn events(e: &Env) -> Vec<String> {
     std::fs::read_to_string(e.ctx.space().join("events.log")).unwrap_or_default().lines().map(String::from).collect()
 }
@@ -177,19 +123,26 @@ fn refuses(e: &Env, needle: &str) {
 }
 
 #[test]
-fn start_gate_refuses_without_setup() {
-    refuses(&env("http://127.0.0.1:1", false, Some(KEY), "claude-sonnet-5-5"), "Setup is not complete");
-    refuses(&env("http://127.0.0.1:1", true, None, "claude-sonnet-5-5"), "API key");
-    refuses(&env("http://127.0.0.1:1", true, Some(KEY), ""), "model");
-    let e = env("http://127.0.0.1:1", true, Some(KEY), "claude-sonnet-5-5");
+fn start_gate_refuses_without_setup_or_claude_code() {
+    refuses(&env(false, None), "Setup is not complete");
+    refuses(&env(true, Some("/nowhere/claude")), "Claude Code was not found at /nowhere/claude");
+    let e = ready();
+    std::fs::write(
+        e.ctx.settings_path(),
+        std::fs::read_to_string(e.ctx.settings_path()).unwrap().replace(&e.proj.display().to_string(), "/no/such/dir"),
+    )
+    .unwrap();
+    refuses(&e, "does not exist");
+    let e = ready();
     std::fs::remove_file(e.ctx.settings_path()).unwrap();
     refuses(&e, "Setup has not been started");
+    let e = ready();
+    assert!(fabr_agent::runner::start_gate(&e.ctx).unwrap().claude_bin == e.fake.bin);
 }
 
 #[test]
 fn heartbeat_is_written_and_removed() {
-    let fake = Fake::new(0);
-    let e = ready(&fake);
+    let e = ready();
     let (mut r, lines) = runner(&e);
     r.start().unwrap();
     let file = e.ctx.space().join("registry/_backend.yaml");
@@ -197,24 +150,21 @@ fn heartbeat_is_written_and_removed() {
     assert!(doc["heartbeat_at"].as_str().unwrap().ends_with('Z'));
     assert_eq!(doc["heartbeat_interval_s"].as_u64(), Some(10));
     assert_eq!(doc["pid"].as_u64(), Some(std::process::id() as u64));
-    assert!(doc["started_at"].as_str().unwrap().ends_with('Z'));
     let start = lines.lock().unwrap().join("\n");
-    assert!(
-        start.contains("default_folder=") && start.contains("model=claude-sonnet-5-5") && start.contains("key=sk-ant-…x9Qa"),
-        "{start}"
-    );
+    assert!(start.contains("default_folder=") && start.contains("model=haiku effort=low"), "{start}");
+    assert!(start.contains(&format!("claude={}", e.fake.bin.display())) && !start.contains("key="), "{start}");
     r.shutdown(true);
     assert!(!file.exists());
     let (mut again, _) = runner(&e);
     again.start().unwrap();
     again.shutdown(false);
     assert!(file.exists());
+    assert_eq!(e.fake.calls(), 0);
 }
 
 #[test]
 fn stale_registry_entries_are_removed_at_start() {
-    let fake = Fake::new(0);
-    let e = ready(&fake);
+    let e = ready();
     let reg = e.ctx.space().join("registry");
     std::fs::create_dir_all(&reg).unwrap();
     let entry =
@@ -234,8 +184,8 @@ fn stale_registry_entries_are_removed_at_start() {
 
 #[test]
 fn delegate_advances_to_a_question_and_emits_waiting_once() {
-    let fake = Fake::new(1);
-    let e = ready(&fake);
+    let e = ready();
+    queue_question(&e);
     let path = new_record(&e, "write a greeting");
     edit(&path, |r| r.requests.delegate = true);
     let (mut r, lines) = runner(&e);
@@ -244,76 +194,46 @@ fn delegate_advances_to_a_question_and_emits_waiting_once() {
     let rec = load(&path);
     assert!(!rec.requests.delegate);
     assert_eq!((rec.state, rec.step), (State::Task, Some(Step::Define)));
-    assert!(rec.waiting);
-    assert_eq!(rec.question.as_ref().unwrap().text, "Which filename?");
-    assert!(rec.cost_usd > 0.0);
+    assert!(rec.waiting && rec.question.as_ref().unwrap().text == "Which filename?");
+    assert!((rec.cost_usd - 0.012).abs() < 1e-9, "{}", rec.cost_usd);
+    assert!(rec.sessions.plan.as_deref().is_some_and(|s| s.len() == 36));
     r.tick();
     r.tick();
     let ev = events(&e);
     assert_eq!(ev.len(), 1, "{ev:?}");
     assert!(ev[0].contains(" waiting ") && ev[0].contains(&task_path_key(&path)) && ev[0].ends_with("one question"), "{}", ev[0]);
-    assert_eq!(fake.calls(), 1);
-    let calls: Vec<String> = lines.lock().unwrap().iter().filter(|l| l.starts_with("model call")).cloned().collect();
+    assert_eq!(e.fake.calls(), 1);
+    assert_eq!(e.fake.cwd(1), e.proj.canonicalize().unwrap());
+    assert_eq!(e.fake.flag(1, "--session-id"), rec.sessions.plan);
+    assert!(e.fake.stdin(1).contains("Task title: write a greeting") && e.fake.stdin(1).contains("some context"));
+    let calls: Vec<String> = lines.lock().unwrap().iter().filter(|l| l.starts_with("claude run")).cloned().collect();
     assert_eq!(calls.len(), 1);
-    let l = &calls[0];
-    for part in [
-        "at=",
-        &format!("record={}", rec.id),
-        "step=define",
-        "model=claude-sonnet-5-5",
-        "in=120",
-        "out=45",
-        "cost_usd=0.00069",
-        "key=sk-ant-…x9Qa",
-    ] {
-        assert!(l.contains(part), "{part} missing from {l}");
+    for part in [&format!("record={}", rec.id), "step=define", "model=haiku", "turns=2", "in=120", "out=40", "cost_usd=0.012000"] {
+        assert!(calls[0].contains(part), "{part} missing from {}", calls[0]);
     }
     r.shutdown(true);
-    assert!(!lines.lock().unwrap().join("\n").contains(KEY));
-    for ent in walk(e.tmp.path()) {
-        assert!(
-            !std::fs::read_to_string(&ent).map(|t| t.contains(KEY)).unwrap_or(false) || ent.ends_with("secrets.toml"),
-            "{}",
-            ent.display()
-        );
-    }
-}
-
-fn walk(dir: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    for ent in std::fs::read_dir(dir).unwrap().flatten() {
-        let p = ent.path();
-        if p.is_dir() { out.extend(walk(&p)) } else { out.push(p) }
-    }
-    out
 }
 
 #[test]
 fn answered_question_is_copied_to_answers_and_the_pipeline_advances() {
-    let fake = Fake::new(1);
-    let e = ready(&fake);
+    let e = ready();
+    queue_question(&e);
+    queue_plan(&e);
     let path = new_record(&e, "write a greeting");
     edit(&path, |r| r.requests.delegate = true);
     let (mut r, _) = runner(&e);
     r.start().unwrap();
     r.tick();
-    edit(&path, |rec| {
-        rec.question.as_mut().unwrap().answer = Some(Answer {
-            value: Some("greet.md".into()),
-            replacement: None,
-            granted: None,
-            by: Some("gui".into()),
-            at: Some("2026-10-24T18:05:02Z".into()),
-        });
-    });
+    answer(&path, "greet.md");
     r.tick();
     let rec = load(&path);
     assert!(rec.question.is_none());
-    assert_eq!(rec.answers.len(), 1);
     assert_eq!(rec.answers[0].answer.as_ref().unwrap().value.as_deref(), Some("greet.md"));
-    assert_eq!(rec.state, State::Defined);
-    assert!(rec.waiting);
-    assert_eq!(rec.approval.as_ref().unwrap().status, "pending");
+    assert!(rec.log.contains("define: answered q1"), "{}", rec.log);
+    assert_eq!((rec.state, rec.waiting, rec.approval.as_ref().unwrap().status.as_str()), (State::Defined, true, "pending"));
+    let sid = rec.sessions.plan.clone();
+    assert_eq!((e.fake.flag(2, "--resume"), e.fake.flag(3, "--resume")), (sid.clone(), sid));
+    assert!(e.fake.stdin(2).contains("User answered: greet.md"), "{}", e.fake.stdin(2));
     let ev = events(&e);
     assert_eq!(ev.len(), 2, "{ev:?}");
     assert!(ev[1].contains(" waiting ") && ev[1].ends_with("plan awaiting approval"));
@@ -322,8 +242,7 @@ fn answered_question_is_copied_to_answers_and_the_pipeline_advances() {
 
 #[test]
 fn cancel_on_in_progress_ends_failed_without_a_registry_entry() {
-    let fake = Fake::new(0);
-    let e = ready(&fake);
+    let e = ready();
     let path = new_record(&e, "long job");
     edit(&path, |r| {
         r.state = State::InProgress;
@@ -338,23 +257,22 @@ fn cancel_on_in_progress_ends_failed_without_a_registry_entry() {
     r.tick();
     let rec = load(&path);
     assert_eq!(rec.state, State::Failed);
-    assert!(!rec.requests.cancel);
-    assert!(rec.verdict.is_none());
-    assert!(rec.log.contains("cancelled by user"));
+    assert!(!rec.requests.cancel && rec.verdict.is_none() && rec.log.contains("cancelled by user"));
     assert!(registry_files(&e).is_empty());
-    assert_eq!(fake.calls(), 0);
+    assert_eq!(e.fake.calls(), 0);
     assert!(events(&e).iter().any(|l| l.contains(" failed  ") && l.ends_with("cancelled by user")));
     r.shutdown(true);
 }
 
 #[test]
 fn redelegate_creates_the_linked_successor() {
-    let fake = Fake::new(1);
-    let e = ready(&fake);
+    let e = ready();
+    queue_question(&e);
     let old = new_record(&e, "retry me");
     edit(&old, |r| {
         r.state = State::Failed;
         r.requests.redelegate = true;
+        r.sessions.execute = Some("old-session".into());
     });
     let (mut r, _) = runner(&e);
     r.start().unwrap();
@@ -365,17 +283,15 @@ fn redelegate_creates_the_linked_successor() {
     let new = load(Path::new(&to));
     assert_eq!(new.links.redelegated_from.as_deref(), Some(task_path_key(&old).as_str()));
     assert_eq!((new.title.as_str(), new.due.as_deref()), ("retry me", Some("2026-11-01")));
-    assert!(new.context.contains("some context"));
-    assert_ne!(new.id, old_rec.id);
+    assert!(new.context.contains("some context") && new.id != old_rec.id);
     assert_eq!(new.state, State::Task);
-    assert!(!new.requests.delegate);
+    assert!(!new.requests.delegate && new.sessions.execute.is_none());
     r.shutdown(true);
 }
 
 #[test]
 fn requests_that_do_not_apply_are_ignored_and_cleared() {
-    let fake = Fake::new(0);
-    let e = ready(&fake);
+    let e = ready();
     let path = new_record(&e, "nothing to cancel");
     edit(&path, |r| r.requests.cancel = true);
     let (mut r, _) = runner(&e);
@@ -389,10 +305,10 @@ fn requests_that_do_not_apply_are_ignored_and_cleared() {
 }
 
 #[test]
-fn a_key_planted_in_an_error_comes_out_redacted() {
-    let fake = Fake::new(0);
-    fake.status.store(500, Ordering::SeqCst);
-    let e = ready(&fake);
+fn a_bot_token_planted_in_claude_output_comes_out_redacted() {
+    let e = ready();
+    let n = e.fake.push(vec![format!("@ERR auth failed for {TOKEN}")]);
+    e.fake.exit_code(n, 1);
     let path = new_record(&e, "will fail");
     edit(&path, |r| r.requests.delegate = true);
     let (mut r, lines) = runner(&e);
@@ -400,15 +316,23 @@ fn a_key_planted_in_an_error_comes_out_redacted() {
     r.tick();
     r.shutdown(true);
     let all = lines.lock().unwrap().join("\n");
-    assert!(all.contains("stopped at"), "{all}");
-    assert!(!all.contains(KEY) && !all.contains("FAKEFAKE"), "{all}");
-    assert!(all.contains("sk-ant-…x9Qa"));
-    assert_eq!(fake.questions.load(Ordering::SeqCst), 0);
+    assert!(all.contains("stopped at") && all.contains("[bot token]"), "{all}");
+    assert!(!all.contains(TOKEN), "{all}");
+    let rec = load(&path);
+    assert!(rec.log.contains("define: error 1: Claude Code ended without a result (exit 1): auth failed for [bot token]"), "{}", rec.log);
+    for ent in walk(e.tmp.path()) {
+        let leaked = std::fs::read_to_string(&ent).map(|t| t.contains(TOKEN)).unwrap_or(false);
+        assert!(!leaked || ent.ends_with("secrets.toml") || ent.starts_with(&e.fake.dir), "{}", ent.display());
+    }
 }
 
-fn runner_with(e: &Env, f: impl FnOnce(Runner) -> Runner) -> (Runner, Arc<Mutex<Vec<String>>>) {
-    let (r, lines) = runner(e);
-    (f(r), lines)
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for ent in std::fs::read_dir(dir).unwrap().flatten() {
+        let p = ent.path();
+        if p.is_dir() { out.extend(walk(&p)) } else { out.push(p) }
+    }
+    out
 }
 
 fn registry_doc(e: &Env) -> serde_yaml::Value {
@@ -427,9 +351,7 @@ fn set_setting(e: &Env, line: &str) {
 
 #[test]
 fn stage_errors_are_logged_held_across_a_restart_and_end_in_failed() {
-    let fake = Fake::new(0);
-    fake.status.store(500, Ordering::SeqCst);
-    let e = ready(&fake);
+    let e = ready();
     let path = new_record(&e, "will fail");
     edit(&path, |r| r.requests.delegate = true);
     let (mut r, _) = runner(&e);
@@ -437,26 +359,28 @@ fn stage_errors_are_logged_held_across_a_restart_and_end_in_failed() {
     r.tick();
     let rec = load(&path);
     assert_eq!((rec.state, rec.step), (State::Task, Some(Step::Define)));
-    assert!(rec.log.contains("define: error 1: "), "{}", rec.log);
-    assert!(!rec.log.contains(KEY) && !rec.log.contains("FAKEFAKE"), "{}", rec.log);
-    assert_eq!(fake.calls(), 3);
+    assert!(
+        rec.log.contains("define: error 1: Claude Code ended without a result (exit 3): fake claude has no canned output"),
+        "{}",
+        rec.log
+    );
+    assert_eq!(e.fake.calls(), 1);
     let doc = registry_doc(&e);
-    assert_eq!(doc["activity"].as_str(), Some("retry"));
-    assert_eq!(doc["step"].as_str(), Some("define"));
+    assert_eq!((doc["activity"].as_str(), doc["step"].as_str()), (Some("retry"), Some("define")));
     assert!(doc["retry_in_s"].as_u64().unwrap() > 0);
-    let last = doc["last_error"].as_str().unwrap();
-    assert!(last.contains("500") && !last.contains(KEY) && !last.contains("FAKEFAKE"), "{last}");
+    assert!(doc["last_error"].as_str().unwrap().contains("exit 3"));
     r.tick();
-    assert_eq!(fake.calls(), 3);
+    assert_eq!(e.fake.calls(), 1);
     r.shutdown(true);
 
     let (mut again, _) = runner(&e);
     again.start().unwrap();
     again.tick();
-    assert_eq!(fake.calls(), 3, "the backoff must survive a restart");
+    assert_eq!(e.fake.calls(), 1, "the backoff must survive a restart");
     again.shutdown(true);
 
-    let (mut eager, _) = runner_with(&e, |r| r.with_retry_base_s(0));
+    let (eager, _) = runner(&e);
+    let mut eager = eager.with_retry_base_s(0);
     eager.start().unwrap();
     eager.tick();
     assert!(load(&path).log.contains("define: error 2: "));
@@ -466,99 +390,79 @@ fn stage_errors_are_logged_held_across_a_restart_and_end_in_failed() {
     assert!(rec.verdict.is_none() && !rec.waiting);
     assert!(rec.log.contains("define: failed after 3 errors"), "{}", rec.log);
     assert!(registry_files(&e).is_empty());
-    let ev = events(&e);
-    assert!(ev.iter().any(|l| l.contains(" failed  ") && l.contains("failed after 3 errors")), "{ev:?}");
+    assert!(events(&e).iter().any(|l| l.contains(" failed  ") && l.contains("failed after 3 errors")), "{:?}", events(&e));
     eager.tick();
-    assert_eq!(fake.calls(), 9);
+    assert_eq!(e.fake.calls(), 3);
     eager.shutdown(true);
 }
 
 #[test]
-fn the_model_retries_429_and_5xx_but_not_400() {
-    let fake = Fake::new(0);
-    fake.script.lock().unwrap().extend([429, 503]);
-    let e = ready(&fake);
-    let path = new_record(&e, "flaky model");
+fn an_error_result_or_missing_structured_output_is_a_stage_error() {
+    let e = ready();
+    e.fake.push(vec![
+        common::init(),
+        json!({"type": "result", "subtype": "error_max_turns", "is_error": true, "session_id": "@SID@", "total_cost_usd": 0.5, "result": ""}).to_string(),
+    ]);
+    e.fake.push(vec![
+        common::init(),
+        json!({"type": "result", "subtype": "success", "is_error": false, "session_id": "@SID@", "total_cost_usd": 0.25, "result": "hi"})
+            .to_string(),
+    ]);
+    let path = new_record(&e, "errors");
     edit(&path, |r| r.requests.delegate = true);
-    let (mut r, _) = runner(&e);
+    let (r, _) = runner(&e);
+    let mut r = r.with_retry_base_s(0);
     r.start().unwrap();
     r.tick();
     let rec = load(&path);
-    assert_eq!(rec.state, State::Defined);
-    assert_eq!(fake.calls(), 4);
-    assert!(!rec.log.contains("error"));
-    r.shutdown(true);
-
-    let fake = Fake::new(0);
-    fake.script.lock().unwrap().extend([400]);
-    let e = ready(&fake);
-    let path = new_record(&e, "bad request");
-    edit(&path, |r| r.requests.delegate = true);
-    let (mut r, _) = runner(&e);
-    r.start().unwrap();
-    r.tick();
-    assert_eq!(fake.calls(), 1);
-    assert!(load(&path).log.contains("define: error 1: "));
-    r.shutdown(true);
-}
-
-#[test]
-fn a_response_cut_off_at_max_tokens_is_a_stage_error() {
-    let fake = Fake::new(0);
-    fake.cut.store(true, Ordering::SeqCst);
-    let e = ready(&fake);
-    let path = new_record(&e, "long answer");
-    edit(&path, |r| r.requests.delegate = true);
-    let (mut r, _) = runner(&e);
-    r.start().unwrap();
+    assert!(rec.log.contains("define: error 1: Claude Code reported error_max_turns"), "{}", rec.log);
     r.tick();
     let rec = load(&path);
-    assert_eq!((rec.state, rec.step), (State::Task, Some(Step::Define)));
-    assert!(rec.log.contains("define: error 1: ") && rec.log.contains("max_tokens"), "{}", rec.log);
-    assert!(fake.bodies.lock().unwrap()[0].contains("\"max_tokens\":4096"));
+    assert!(rec.log.contains("define: error 2: Claude Code returned no structured output"), "{}", rec.log);
+    assert!((rec.cost_usd - 0.75).abs() < 1e-9, "{}", rec.cost_usd);
+    assert_eq!(e.fake.flag(2, "--resume"), rec.sessions.plan);
     r.shutdown(true);
 }
 
 #[test]
 fn the_registry_entry_follows_the_task_from_gather_to_notify() {
-    let fake = Fake::new(1);
-    let e = ready(&fake);
+    let e = ready();
+    queue_question(&e);
+    queue_plan(&e);
+    e.fake.push(vec![
+        common::init(),
+        common::tool_use("Write", json!({"file_path": "greet.md", "content": "hi"})),
+        "@SH printf hi > greet.md".into(),
+        common::result(exec_out("done", "wrote greet.md"), 0.05, json!([])),
+    ]);
+    e.fake.push(ok(verdict_out(true), 0.01));
     let path = new_record(&e, "write a greeting");
     edit(&path, |r| r.requests.delegate = true);
     let (mut r, _) = runner(&e);
     r.start().unwrap();
     r.tick();
     let doc = registry_doc(&e);
-    assert_eq!(doc["state"].as_str(), Some("task"));
-    assert_eq!(doc["step"].as_str(), Some("define"));
-    assert_eq!(doc["waiting"].as_str(), Some("question"));
-    assert_eq!(doc["activity"].as_str(), Some("parked"));
-    assert!(doc["step_at"].as_str().unwrap().ends_with('Z'));
-    assert!(doc["started_at"].as_str().unwrap().ends_with('Z'));
+    assert_eq!((doc["state"].as_str(), doc["step"].as_str()), (Some("task"), Some("define")));
+    assert_eq!((doc["waiting"].as_str(), doc["activity"].as_str()), (Some("question"), Some("parked")));
     assert!(doc["retry_in_s"].is_null() && doc["last_error"].is_null());
     assert_eq!(doc["usage"]["define"]["calls"].as_u64(), Some(1));
     assert_eq!(doc["usage"]["define"]["input_tokens"].as_u64(), Some(120));
-    assert_eq!(doc["usage"]["define"]["output_tokens"].as_u64(), Some(45));
-    assert!(doc["usage"]["define"]["usd"].as_f64().unwrap() > 0.0);
+    assert_eq!(doc["usage"]["define"]["output_tokens"].as_u64(), Some(40));
+    assert!((doc["usage"]["define"]["usd"].as_f64().unwrap() - 0.012).abs() < 1e-9);
     assert_eq!(doc["question"]["text"].as_str(), Some("Which filename?"));
     let started = doc["started_at"].as_str().unwrap().to_string();
-    let step_at = doc["step_at"].as_str().unwrap().to_string();
 
-    edit(&path, |rec| {
-        rec.question.as_mut().unwrap().answer =
-            Some(Answer { value: Some("greet.md".into()), replacement: None, granted: None, by: Some("gui".into()), at: None });
-    });
+    answer(&path, "greet.md");
     r.tick();
     let doc = registry_doc(&e);
-    assert_eq!(doc["state"].as_str(), Some("defined"));
-    assert_eq!(doc["step"].as_str(), Some("approve"));
-    assert_eq!(doc["waiting"].as_str(), Some("approval"));
+    assert_eq!(
+        (doc["state"].as_str(), doc["step"].as_str(), doc["waiting"].as_str()),
+        (Some("defined"), Some("approve"), Some("approval"))
+    );
     assert_eq!(doc["started_at"].as_str(), Some(started.as_str()));
-    assert!(doc["step_at"].as_str().unwrap() >= step_at.as_str());
-    assert_eq!(doc["usage"]["plan"]["calls"].as_u64(), Some(1));
-    assert_eq!(doc["usage"]["define"]["calls"].as_u64(), Some(2));
+    assert_eq!((doc["usage"]["plan"]["calls"].as_u64(), doc["usage"]["define"]["calls"].as_u64()), (Some(1), Some(2)));
     let cost = doc["cost_usd"].as_f64().unwrap();
-    assert!((cost - load(&path).cost_usd).abs() < 1e-9, "{cost}");
+    assert!((cost - load(&path).cost_usd).abs() < 1e-9 && (cost - 0.042).abs() < 1e-9, "{cost}");
 
     edit(&path, |rec| {
         let a = rec.approval.as_mut().unwrap();
@@ -567,15 +471,17 @@ fn the_registry_entry_follows_the_task_from_gather_to_notify() {
     });
     r.tick();
     let rec = load(&path);
-    assert!(rec.state == State::Failed && rec.step.is_none(), "{:?} {:?}", rec.state, rec.step);
+    assert_eq!((rec.state, rec.step), (State::Succeeded, None), "{}", rec.log);
+    assert!(rec.log.contains("execute: Write greet.md"), "{}", rec.log);
+    assert!((rec.cost_usd - 0.102).abs() < 1e-9, "{}", rec.cost_usd);
     assert!(registry_files(&e).is_empty());
     r.shutdown(true);
 }
 
 #[test]
 fn the_heartbeat_interval_comes_from_settings() {
-    let fake = Fake::new(1);
-    let e = ready(&fake);
+    let e = ready();
+    queue_question(&e);
     set_setting(&e, "heartbeat_interval_s = 3");
     let (mut r, _) = runner(&e);
     r.start().unwrap();
@@ -605,8 +511,7 @@ fn now_ts() -> String {
 
 #[test]
 fn events_missed_while_the_runner_was_down_are_emitted_once_after_restart() {
-    let fake = Fake::new(0);
-    let e = ready(&fake);
+    let e = ready();
     let space = e.ctx.space();
     std::fs::write(space.join("events.log"), "2026-01-01T00:00:00Z done    /elsewhere/.fabric-space/tasks/x.md 1 of 1 assertions passed\n")
         .unwrap();
@@ -650,14 +555,16 @@ fn events_missed_while_the_runner_was_down_are_emitted_once_after_restart() {
     again.tick();
     again.shutdown(true);
     assert_eq!(events(&e).len(), ev.len(), "a second restart must not repeat events");
+    assert_eq!(e.fake.calls(), 0);
 }
 
 fn to_awaiting_approval(e: &Env, r: &mut Runner, title: &str) -> PathBuf {
+    queue_plan(e);
     let path = new_record(e, title);
     edit(&path, |rec| rec.requests.delegate = true);
     r.tick();
     let rec = load(&path);
-    assert_eq!((rec.state, rec.step), (State::Defined, Some(Step::Approve)));
+    assert_eq!((rec.state, rec.step), (State::Defined, Some(Step::Approve)), "{}", rec.log);
     path
 }
 
@@ -671,12 +578,11 @@ fn approve(path: &Path) {
 
 #[test]
 fn pause_keeps_the_step_and_the_registry_says_paused_until_resume() {
-    let fake = Fake::new(0);
-    let e = ready(&fake);
+    let e = ready();
     let (mut r, _) = runner(&e);
     r.start().unwrap();
     let path = to_awaiting_approval(&e, &mut r, "pause me");
-    let calls = fake.calls();
+    let calls = e.fake.calls();
     edit(&path, |rec| rec.requests.pause = true);
     r.tick();
     let rec = load(&path);
@@ -690,7 +596,7 @@ fn pause_keeps_the_step_and_the_registry_says_paused_until_resume() {
     approve(&path);
     r.tick();
     r.tick();
-    assert_eq!((load(&path).state, fake.calls()), (State::Defined, calls));
+    assert_eq!((load(&path).state, e.fake.calls()), (State::Defined, calls));
     r.shutdown(true);
     let (mut again, _) = runner(&e);
     again.start().unwrap();
@@ -707,8 +613,7 @@ fn pause_keeps_the_step_and_the_registry_says_paused_until_resume() {
 
 #[test]
 fn resume_without_pause_and_pause_on_a_reminder_are_ignored() {
-    let fake = Fake::new(0);
-    let e = ready(&fake);
+    let e = ready();
     let path = new_record(&e, "idle");
     edit(&path, |rec| {
         rec.requests.pause = true;
@@ -725,8 +630,7 @@ fn resume_without_pause_and_pause_on_a_reminder_are_ignored() {
 
 #[test]
 fn suspend_removes_the_entry_logs_once_and_skips_the_record() {
-    let fake = Fake::new(0);
-    let e = ready(&fake);
+    let e = ready();
     let (mut r, _) = runner(&e);
     r.start().unwrap();
     let reminder = new_record(&e, "shelved reminder");
@@ -753,8 +657,7 @@ fn suspend_removes_the_entry_logs_once_and_skips_the_record() {
 
 #[test]
 fn a_passed_suspend_until_clears_itself_and_driving_resumes() {
-    let fake = Fake::new(0);
-    let e = ready(&fake);
+    let e = ready();
     let (mut r, _) = runner(&e);
     r.start().unwrap();
     let path = to_awaiting_approval(&e, &mut r, "back soon");
@@ -775,8 +678,7 @@ fn a_passed_suspend_until_clears_itself_and_driving_resumes() {
 
 #[test]
 fn a_paused_task_does_not_block_the_next_one_in_the_folder() {
-    let fake = Fake::new(0);
-    let e = ready(&fake);
+    let e = ready();
     let blocker = new_record(&e, "paused job");
     edit(&blocker, |rec| {
         rec.state = State::InProgress;
@@ -796,8 +698,7 @@ fn a_paused_task_does_not_block_the_next_one_in_the_folder() {
 
 #[test]
 fn complete_during_execute_succeeds_and_emits_done() {
-    let fake = Fake::new(0);
-    let e = ready(&fake);
+    let e = ready();
     let path = new_record(&e, "long job");
     edit(&path, |r| {
         r.state = State::InProgress;
@@ -814,15 +715,14 @@ fn complete_during_execute_succeeds_and_emits_done() {
     assert!(!rec.requests.complete && !rec.paused && rec.verdict.is_none());
     assert!(rec.log.contains("execute: completed by user"), "{}", rec.log);
     assert!(registry_files(&e).is_empty());
-    assert_eq!(fake.calls(), 0);
+    assert_eq!(e.fake.calls(), 0);
     assert!(events(&e).iter().any(|l| l.contains(" done ")), "{:?}", events(&e));
     r.shutdown(true);
 }
 
 #[test]
 fn complete_while_paused_succeeds() {
-    let fake = Fake::new(0);
-    let e = ready(&fake);
+    let e = ready();
     let (mut r, _) = runner(&e);
     r.start().unwrap();
     let path = to_awaiting_approval(&e, &mut r, "pause then done");
@@ -841,8 +741,7 @@ fn complete_while_paused_succeeds() {
 
 #[test]
 fn complete_on_a_reminder_goes_through_the_runner() {
-    let fake = Fake::new(0);
-    let e = ready(&fake);
+    let e = ready();
     let path = new_record(&e, "by hand");
     edit(&path, |rec| rec.requests.complete = true);
     let (mut r, _) = runner(&e);
@@ -852,5 +751,117 @@ fn complete_on_a_reminder_goes_through_the_runner() {
     assert_eq!(rec.state, State::Succeeded);
     assert!(!rec.requests.complete);
     assert!(rec.log.contains("done: completed by user"), "{}", rec.log);
+    r.shutdown(true);
+}
+
+#[test]
+fn the_whole_pipeline_runs_through_claude_code_sessions() {
+    let e = ready();
+    std::fs::write(e.proj.join("notes.md"), "say hi").unwrap();
+    let notes = e.proj.join("notes.md").to_string_lossy().into_owned();
+    queue_question(&e);
+    e.fake.push(ok(define_out(None), 0.01));
+    e.fake.push(ok(plan_out(&["Write"]), 0.02));
+    e.fake.push(vec![
+        common::init(),
+        common::tool_use("Read", json!({"file_path": notes})),
+        common::tool_use("Bash", json!({"command": "npm install left-pad"})),
+        common::result(
+            exec_out("blocked", "npm install was denied"),
+            0.03,
+            json!([{"tool_name": "Bash", "tool_use_id": "t", "tool_input": {"command": "npm install left-pad"}}]),
+        ),
+    ]);
+    e.fake.push(vec![
+        common::init(),
+        common::tool_use("Bash", json!({"command": "npm install left-pad"})),
+        common::tool_use("Write", json!({"file_path": "greet.md", "content": "hi"})),
+        "@SH printf hi > greet.md".into(),
+        common::result(exec_out("done", "installed left-pad and wrote greet.md"), 0.04, json!([])),
+    ]);
+    e.fake.push(ok(verdict_out(true), 0.005));
+    let path = new_record(&e, "write a greeting");
+    edit(&path, |r| r.requests.delegate = true);
+    let (mut r, _) = runner(&e);
+    r.start().unwrap();
+
+    r.tick();
+    let rec = load(&path);
+    assert_eq!((rec.state, rec.step, rec.waiting), (State::Task, Some(Step::Define), true));
+    assert!(rec.context.contains("### Gathered") && rec.context.contains("notes.md: say hi"), "{}", rec.context);
+    let planner = rec.sessions.plan.clone().unwrap();
+    assert_eq!(e.fake.flag(1, "--session-id").as_deref(), Some(planner.as_str()));
+    for (flag, want) in [
+        ("--permission-mode", "plan"),
+        ("--permission-prompts", "none"),
+        ("--tools", "Read,Glob,Grep"),
+        ("--allowedTools", "Read Glob Grep"),
+        ("--output-format", "stream-json"),
+        ("--model", "haiku"),
+        ("--effort", "low"),
+    ] {
+        assert_eq!(e.fake.flag(1, flag).as_deref(), Some(want), "{flag}");
+    }
+    assert!(e.fake.has(1, "-p") && e.fake.has(1, "--verbose"));
+    assert!(e.fake.flag(1, "--json-schema").unwrap().contains("assertions"));
+
+    answer(&path, "greet.md");
+    r.tick();
+    let rec = load(&path);
+    assert_eq!((rec.state, rec.step), (State::Defined, Some(Step::Approve)));
+    assert!(rec.plan.contains("### Outputs"));
+    for n in [2, 3] {
+        assert_eq!(e.fake.flag(n, "--resume").as_deref(), Some(planner.as_str()), "call {n}");
+        assert!(!e.fake.has(n, "--session-id"));
+    }
+    assert!(e.fake.flag(3, "--json-schema").unwrap().contains("reversibility"));
+    assert!(e.fake.stdin(3).contains("### Inputs") && e.fake.stdin(3).contains("Bash(npm test:*)"));
+
+    approve(&path);
+    r.tick();
+    let rec = load(&path);
+    assert_eq!((rec.state, rec.step, rec.waiting), (State::InProgress, Some(Step::Execute), true));
+    let executor = rec.sessions.execute.clone().unwrap();
+    assert_ne!(executor, planner);
+    assert_eq!(e.fake.flag(4, "--session-id").as_deref(), Some(executor.as_str()));
+    assert_eq!(e.fake.flag(4, "--permission-mode").as_deref(), Some("acceptEdits"));
+    assert_eq!(e.fake.flag(4, "--permission-prompts").as_deref(), Some("none"));
+    assert_eq!(e.fake.flag(4, "--allowedTools").as_deref(), Some("Read Glob Grep Write"));
+    assert!(!e.fake.has(4, "--tools"));
+    assert!(e.fake.stdin(4).contains("Approved plan:") && e.fake.stdin(4).contains("### Steps"));
+    for line in ["execute: Read notes.md", "execute: Bash npm install left-pad", "execute: denied Bash(npm install:*)", "execute: asked q2"]
+    {
+        assert!(rec.log.contains(line), "{line}: {}", rec.log);
+    }
+    let q = rec.question.as_ref().unwrap();
+    assert!(q.text.contains("run `npm install left-pad`") && q.text.contains("Reply allow"), "{}", q.text);
+    assert_eq!(registry_doc(&e)["waiting"].as_str(), Some("question"));
+
+    answer(&path, "allow");
+    r.tick();
+    let rec = load(&path);
+    assert_eq!((rec.state, rec.step), (State::Succeeded, None), "{}", rec.log);
+    assert_eq!(e.fake.flag(5, "--resume").as_deref(), Some(executor.as_str()));
+    assert_eq!(e.fake.flag(5, "--allowedTools").as_deref(), Some("Read Glob Grep Write Bash(npm install:*)"));
+    assert!(e.fake.stdin(5).contains("Continue the task") && e.fake.stdin(5).contains("User answered: allow"));
+    assert!(rec.log.contains("execute: allowed Bash(npm install:*) by user; approval re-signed"), "{}", rec.log);
+    assert_eq!(rec.plan_meta.as_ref().unwrap().tools, ["Write", "Bash(npm install:*)"]);
+    assert_eq!(rec.approval.as_ref().unwrap().digest.as_deref(), Some(taskrec::approval_digest(&rec).as_str()));
+    assert_eq!(std::fs::read_to_string(e.proj.join("greet.md")).unwrap(), "hi");
+    let validator = rec.sessions.evaluate.clone().unwrap();
+    assert!(validator != executor && validator != planner);
+    assert_eq!(e.fake.flag(6, "--session-id").as_deref(), Some(validator.as_str()));
+    assert_eq!(e.fake.flag(6, "--permission-mode").as_deref(), Some("plan"));
+    assert_eq!(e.fake.flag(6, "--tools").as_deref(), Some("Read,Glob,Grep"));
+    assert!(e.fake.stdin(6).contains("installed left-pad and wrote greet.md") && e.fake.stdin(6).contains("test -f greet.md exit 0"));
+    let v = rec.verdict.as_ref().unwrap();
+    assert_eq!((v.result.as_str(), v.items[0].evidence.as_str()), ("pass", "greet.md holds hi"));
+    assert!((rec.cost_usd - 0.117).abs() < 1e-9, "{}", rec.cost_usd);
+    assert_eq!(e.fake.calls(), 6);
+    assert!(events(&e).iter().any(|l| l.contains(" done ") && l.ends_with("1 of 1 assertions passed")), "{:?}", events(&e));
+    assert!(registry_files(&e).is_empty());
+    assert!(rec.log.contains("learn: captured 1 answer"), "{}", rec.log);
+    let learned = fabr_core::knowledge::read_learned(&e.proj).unwrap();
+    assert_eq!(learned.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["greet.md"]);
     r.shutdown(true);
 }

@@ -1187,13 +1187,12 @@ dependencies = [
  "chrono",
  "fabr-core",
  "log",
+ "rand 0.10.3",
  "serde",
  "serde_json",
  "serde_yaml",
  "tempfile",
- "tiny_http",
  "toml_edit 0.25.17+spec-1.1.0",
- "ureq",
 ]
 
 [[package]]

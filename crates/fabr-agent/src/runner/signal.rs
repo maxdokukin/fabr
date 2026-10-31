@@ -23,3 +23,7 @@ pub fn install() -> &'static AtomicBool {
     }
     &STOP
 }
+
+pub fn stopping() -> bool {
+    STOP.load(std::sync::atomic::Ordering::SeqCst)
+}

@@ -1,4 +1,4 @@
-use crate::model::{CallObserver, ModelCall};
+use crate::engine::Usage;
 use crate::now_utc;
 use fabr_core::redact::redact;
 use std::collections::{BTreeMap, HashMap};
@@ -10,13 +10,6 @@ pub struct StepUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub usd: f64,
-}
-
-#[derive(Default)]
-struct Totals {
-    record_id: String,
-    cost: f64,
-    usage: HashMap<String, BTreeMap<String, StepUsage>>,
 }
 
 #[derive(Clone, Default)]
@@ -51,73 +44,40 @@ impl Sink {
 
 pub struct CallLog {
     sink: Sink,
-    fingerprint: String,
-    state: Mutex<Totals>,
+    model: String,
+    state: Mutex<HashMap<String, BTreeMap<String, StepUsage>>>,
 }
 
 impl CallLog {
-    pub fn new(sink: Sink, fingerprint: String) -> Arc<CallLog> {
-        Arc::new(CallLog { sink, fingerprint, state: Mutex::new(Totals::default()) })
-    }
-
-    pub fn begin(&self, record_id: &str) {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.record_id = record_id.to_string();
-        state.cost = 0.0;
-    }
-
-    pub fn take_cost(&self) -> f64 {
-        std::mem::take(&mut self.state.lock().unwrap_or_else(PoisonError::into_inner).cost)
-    }
-
-    pub fn pending_cost(&self) -> f64 {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner).cost
+    pub fn new(sink: Sink, model: String) -> Arc<CallLog> {
+        Arc::new(CallLog { sink, model, state: Mutex::new(HashMap::new()) })
     }
 
     pub fn usage(&self, record_id: &str) -> BTreeMap<String, StepUsage> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner).usage.get(record_id).cloned().unwrap_or_default()
+        self.state.lock().unwrap_or_else(PoisonError::into_inner).get(record_id).cloned().unwrap_or_default()
     }
 
     pub fn forget(&self, record_id: &str) {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner).usage.remove(record_id);
+        self.state.lock().unwrap_or_else(PoisonError::into_inner).remove(record_id);
     }
 
-    pub fn observer(self: &Arc<Self>) -> CallObserver {
-        let this = self.clone();
-        Arc::new(move |call| this.record(call))
-    }
-
-    fn record(&self, call: &ModelCall) {
-        let cost = match (call.input_tokens, call.output_tokens) {
-            (Some(i), Some(o)) => Some(cost_usd(&call.model, i, o)),
-            _ => None,
-        };
-        let id = {
+    pub fn record(&self, record_id: &str, step: &str, session: Option<&str>, usage: &Usage, usd: f64) {
+        {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            state.cost += cost.unwrap_or(0.0);
-            let id = state.record_id.clone();
-            let slot = state.usage.entry(id.clone()).or_default().entry(call.step.to_string()).or_default();
+            let slot = state.entry(record_id.to_string()).or_default().entry(step.to_string()).or_default();
             slot.calls += 1;
-            slot.input_tokens += call.input_tokens.unwrap_or(0);
-            slot.output_tokens += call.output_tokens.unwrap_or(0);
-            slot.usd += cost.unwrap_or(0.0);
-            id
-        };
-        let n = |v: Option<u64>| v.map_or("-".to_string(), |v| v.to_string());
-        let cost_text = cost.map(|c| format!(" cost_usd={c:.6}")).unwrap_or_default();
+            slot.input_tokens += usage.input_tokens;
+            slot.output_tokens += usage.output_tokens;
+            slot.usd += usd;
+        }
+        let model = if self.model.is_empty() { "default" } else { self.model.as_str() };
         self.sink.info(format!(
-            "model call at={} record={id} step={} model={} in={} out={}{cost_text} key={}",
+            "claude run at={} record={record_id} step={step} session={} model={model} turns={} in={} out={} cost_usd={usd:.6}",
             now_utc(),
-            call.step,
-            call.model,
-            n(call.input_tokens),
-            n(call.output_tokens),
-            self.fingerprint
+            session.unwrap_or("-"),
+            usage.turns,
+            usage.input_tokens,
+            usage.output_tokens
         ));
     }
-}
-
-pub fn cost_usd(model: &str, input: u64, output: u64) -> f64 {
-    let (pin, pout) = if model.contains("haiku") { (0.10, 0.50) } else { (2.0, 10.0) };
-    (input as f64 * pin + output as f64 * pout) / 1_000_000.0
 }
