@@ -198,6 +198,13 @@ export interface FabricSecretsStatus {
   telegram_bot_token_fingerprint?: string | null;
 }
 export interface OpenSessionReq { folder: string; session_id: string }
+export interface OpenClaudeReq { folder: string }
+export interface CcSession { id: string; title: string; modified_at: string; messages: number; bytes: number }
+export interface TranscriptEntry { role: 'user' | 'assistant' | 'tool'; text: string; tool?: string | null; at?: string | null }
+export interface Transcript { id: string; title: string; entries: TranscriptEntry[]; truncated: boolean }
+export interface LearnedRecord { id: string; text: string; applies_when: string; scope: string; count: number; source_tasks: string[]; last_confirmed?: string | null }
+export type KnowledgeKind = 'rules' | 'knowledge';
+export interface NodeKnowledge { rules: string; knowledge: string; learned: LearnedRecord[] }
 export interface FabricAgentStatus { running: boolean; reason: string | null }
 export type FabricCheckKind = 'folder' | 'claude' | 'telegram_token';
 export interface FabricCheckReq { kind: FabricCheckKind; path?: string }

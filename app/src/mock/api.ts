@@ -1,6 +1,6 @@
 import type { Api } from '../lib/api/index';
 import {
-  ApiError, type Meta, type Node, type NodeRef, type Settings, type Source, type TestResult, type Tree, type DirEntry, type FabricSettings, type FabricSecretsStatus,
+  ApiError, type Meta, type Node, type NodeRef, type Settings, type Source, type TestResult, type Tree, type DirEntry, type FabricSettings, type FabricSecretsStatus, type NodeKnowledge, type KnowledgeKind, type Transcript,
 } from '../lib/api/types';
 import { FixtureSource, guardState, newRecord, taskSlug, updatedAtOf } from '../lib/fabric/source';
 import { parseRecord } from '../lib/fabric/parse';
@@ -30,6 +30,26 @@ export function createMockApi(opts: MockOpts = {}): Api {
     claude_bin: '', effort: '',
   };
   let fabSettingsExist = false;
+  let know: NodeKnowledge = {
+    rules: 'Ask before deleting files.\nKeep commits small.',
+    knowledge: 'Tests run with npm test.\nThe API lives in src/server.',
+    learned: [{ id: 'l1', text: 'Prefer pnpm over npm here.', applies_when: 'installing packages', scope: 'project', count: 3, source_tasks: [], last_confirmed: null }],
+  };
+  const ccSessions = [
+    { id: 'mock-session-1', title: 'Fix the login redirect', modified_at: new Date(Date.now() - 3600_000).toISOString(), messages: 6, bytes: 4200 },
+    { id: 'mock-session-2', title: '', modified_at: new Date(Date.now() - 3 * 86400_000).toISOString(), messages: 2, bytes: 900 },
+  ];
+  const ccTranscript = (id: string, limit: number): Transcript => {
+    const all: Transcript['entries'] = [
+      { role: 'user', text: 'The login page redirects to a blank screen.\nCan you look?' },
+      { role: 'assistant', text: 'I will check the redirect handler first.' },
+      { role: 'tool', text: 'src/auth/redirect.ts', tool: 'Read' },
+      { role: 'tool', text: 'npm test', tool: 'Bash' },
+      { role: 'assistant', text: 'The redirect used a relative path. Fixed it.' },
+    ];
+    const entries = all.slice(-limit);
+    return { id, title: ccSessions.find((s) => s.id === id)?.title ?? '', entries, truncated: entries.length < all.length };
+  };
   const fabSecrets: FabricSecretsStatus = { telegram_bot_token: false };
   const fabric = new FixtureSource();
   const FAB_EVENTS = '/fixtures/home/.fabric-space/events.log';
@@ -234,6 +254,16 @@ export function createMockApi(opts: MockOpts = {}): Api {
     },
     async fabricSecretsStatus() { await wait(); return { ...fabSecrets }; },
     async fabricOpenSession() { throw new ApiError(501, 'Opening a terminal works in the desktop app only'); },
+    async fabricOpenClaude() { throw new ApiError(501, 'Opening a terminal works in the desktop app only'); },
+    async fabricCcSessions() { await wait(); return clone(ccSessions); },
+    async fabricCcTranscript(_f, id, limit = 300) {
+      await wait();
+      if (!ccSessions.some((s) => s.id === id)) throw new ApiError(404, 'No such session');
+      return ccTranscript(id, limit);
+    },
+    async fabricKnowledgeRead() { await wait(); return clone(know); },
+    async fabricKnowledgeWrite(_f, kind: KnowledgeKind, text) { await wait(); know = { ...know, [kind]: text }; return clone(know); },
+    async fabricLearnedForget(_f, id) { await wait(); know = { ...know, learned: know.learned.filter((l) => l.id !== id) }; return clone(know); },
     async fabricAgentStatus() { return { running: true, reason: null }; },
     async fabricAgentStart() { return { running: true, reason: null }; },
     async fabricCheck(req) {

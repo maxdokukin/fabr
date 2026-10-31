@@ -6,6 +6,7 @@
   import Icon from '../ui/Icon.svelte';
   import Row from '../ui/Row.svelte';
   import BannerView from '../panel/Banner.svelte';
+  import NodeClaude from './NodeClaude.svelte';
   import MetaEditor from '../panel/MetaEditor.svelte';
 
   let { store, p }: { store: Store; p: NodeSettingsState } = $props();
@@ -117,6 +118,8 @@
     <MetaEditor section="more" {...metaProps} />
     <p class="hint">Fields save on Enter or when you leave them.</p>
   </section>
+
+  {#if src && !src.host}<NodeClaude root={src.root} path={p.path} />{/if}
 
   <section class="nodeset__section">
     <h3 class="section-title">Actions</h3>

@@ -38,6 +38,9 @@ function realHttpApi(): Api {
     fabricOpenSession: async () => {
       throw new ApiError(501, 'Opening a terminal works in the desktop app only');
     },
+    fabricOpenClaude: async () => {
+      throw new ApiError(501, 'Opening a terminal works in the desktop app only');
+    },
     openUrl: async (url) => {
       if (/^https?:\/\//i.test(url)) window.open(url, '_blank', 'noopener');
     },

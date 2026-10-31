@@ -1,7 +1,7 @@
 mod agent;
 
 use agent::AgentHost;
-use fabr_core::ops::{Desktop, Done, dispatch, session_command, url_allowed};
+use fabr_core::ops::{Desktop, Done, claude_command, dispatch, session_command, url_allowed};
 use fabr_core::workspace::Workspace;
 use fabr_core::{AppDirs, ErrorDto, FabrError, client_error};
 use tauri::{Manager, RunEvent, State};
@@ -19,6 +19,7 @@ fn effect(ws: &Workspace, d: Desktop) -> Result<(), FabrError> {
             tauri_plugin_opener::reveal_item_in_dir(p).map_err(io)
         }
         Desktop::OpenSession(r) => open_terminal(&session_command(&r)?),
+        Desktop::OpenClaude(r) => open_terminal(&claude_command(&r)?),
         Desktop::OpenUrl(r) => {
             let u = r.url.trim();
             if !url_allowed(u) {
@@ -94,7 +95,10 @@ pub fn run() {
                     app.manage(ws);
                     app.manage(AgentHost::default());
                     let host = app.state::<AgentHost>();
-                    if fabr_core::setup::settings_read(&fabr_core::setup::Ctx::from_env()).is_ok_and(|r| r.settings.setup.completed) {
+                    if fabr_core::setup::settings_read(&fabr_core::setup::Ctx::from_env()).is_ok_and(|r| {
+                        let done = &r.settings.setup.completed_steps;
+                        ["folder", "claude"].iter().all(|s| done.iter().any(|d| d == s))
+                    }) {
                         start_agent(&host);
                     }
                 }

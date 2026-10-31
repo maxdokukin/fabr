@@ -1,9 +1,11 @@
+use crate::ccsession::{self, SessionsReq, TranscriptReq};
 use crate::dto::{
     Empty, GetTreeReq, HostReq, InitChildrenReq, InstallKeyReq, ListDirsReq, NodeRef, OpenUrlReq, RemoveNodeReq, RevealPathReq,
     SaveMetaReq, SaveSourcesReq, SourceIdReq, SourcePasswordReq, Stamp,
 };
 use crate::error::FabrError;
 use crate::fabric::{self, FabricCreateReq, FabricListReq, FabricReadReq, FabricStampReq, FabricWriteReq, ImportTodosReq};
+use crate::knowledge::{self, KnowledgeReadReq, KnowledgeWriteReq, LearnedForgetReq};
 use crate::settings::Settings;
 use crate::setup::{self, CheckReq, Ctx, LinkReq, SecretsWriteReq, SettingsWriteReq};
 use crate::sources::Source;
@@ -30,12 +32,18 @@ pub enum Desktop {
     Reveal(RevealPathReq),
     OpenUrl(OpenUrlReq),
     OpenSession(OpenSessionReq),
+    OpenClaude(OpenClaudeReq),
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct OpenSessionReq {
     pub folder: String,
     pub session_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenClaudeReq {
+    pub folder: String,
 }
 
 #[derive(Debug)]
@@ -104,6 +112,25 @@ ops! {
     reveal_path Post true (RevealPathReq) |_, r| Ok(Done::Desktop(Desktop::Reveal(r)));
     open_url Post false (OpenUrlReq) |_, r| Ok(Done::Desktop(Desktop::OpenUrl(r)));
     fabric_open_session Post false (OpenSessionReq) |_, r| Ok(Done::Desktop(Desktop::OpenSession(r)));
+    fabric_open_claude Post false (OpenClaudeReq) |_, r| Ok(Done::Desktop(Desktop::OpenClaude(r)));
+    fabric_cc_sessions Post true (SessionsReq) |_, r| json(ccsession::list(&ccsession::config_dir(&Ctx::from_env().home), &local_dir(&r.folder)?)?);
+    fabric_cc_transcript Post true (TranscriptReq) |_, r| json(ccsession::transcript(&ccsession::config_dir(&Ctx::from_env().home), &local_dir(&r.folder)?, &r.id, r.limit.unwrap_or(300))?);
+    fabric_knowledge_read Post true (KnowledgeReadReq) |_, r| json(knowledge::read(&local_dir(&r.folder)?)?);
+    fabric_knowledge_write Post true (KnowledgeWriteReq) |_, r| json(knowledge::write(&local_dir(&r.folder)?, &r.kind, &r.text)?);
+    fabric_learned_forget Post true (LearnedForgetReq) |_, r| json(knowledge::forget(&local_dir(&r.folder)?, &r.id)?);
+}
+
+fn local_dir(folder: &str) -> Result<std::path::PathBuf, FabrError> {
+    let dir = std::path::PathBuf::from(folder);
+    if !dir.is_absolute() || !dir.is_dir() {
+        return Err(FabrError::BadRequest(format!("{folder} is not a folder on this computer")));
+    }
+    Ok(dir)
+}
+
+pub fn claude_command(req: &OpenClaudeReq) -> Result<String, FabrError> {
+    local_dir(&req.folder)?;
+    Ok(format!("cd {} && claude", quote_sh(&req.folder)))
 }
 
 pub fn url_allowed(u: &str) -> bool {
@@ -120,10 +147,7 @@ pub fn session_command(req: &OpenSessionReq) -> Result<String, FabrError> {
     if id.is_empty() || id.len() > 64 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         return Err(FabrError::BadRequest("that is not a session id".into()));
     }
-    let dir = std::path::Path::new(&req.folder);
-    if !dir.is_absolute() || !dir.is_dir() {
-        return Err(FabrError::BadRequest(format!("{} is not a folder on this computer", req.folder)));
-    }
+    local_dir(&req.folder)?;
     Ok(format!("cd {} && claude --resume {id}", quote_sh(&req.folder)))
 }
 
@@ -147,6 +171,52 @@ mod session_tests {
         }
         assert!(session_command(&req("relative", "abc")).is_err());
         assert!(session_command(&req(d.path().join("nope").to_str().unwrap(), "abc")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod cc_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn run(name: &str, body: Value) -> Result<Value, FabrError> {
+        let t = tempfile::tempdir().unwrap();
+        let ws = Workspace::from_config(&t.path().join("cfg"), &t.path().join("cache"), Some(t.path().join("root"))).unwrap();
+        match dispatch(&ws, name, body)? {
+            Done::Json(v) => Ok(v),
+            Done::Desktop(_) => panic!("desktop"),
+        }
+    }
+
+    #[test]
+    fn new_claude_command_quotes_and_checks_the_folder() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().to_str().unwrap().to_string();
+        assert_eq!(claude_command(&OpenClaudeReq { folder: f.clone() }).unwrap(), format!("cd '{f}' && claude"));
+        assert!(claude_command(&OpenClaudeReq { folder: "rel".into() }).is_err());
+        assert!(claude_command(&OpenClaudeReq { folder: format!("{f}/nope") }).is_err());
+    }
+
+    #[test]
+    fn knowledge_ops_round_trip_and_reject_bad_folders() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().to_str().unwrap();
+        run("fabric_knowledge_write", json!({"folder": f, "kind": "rules", "text": "Be brief."})).unwrap();
+        let k = run("fabric_knowledge_read", json!({"folder": f})).unwrap();
+        assert_eq!(k["rules"].as_str().unwrap().trim(), "Be brief.");
+        assert_eq!(k["learned"], json!([]));
+        assert!(run("fabric_knowledge_write", json!({"folder": f, "kind": "nope", "text": "x"})).is_err());
+        assert!(run("fabric_knowledge_read", json!({"folder": "relative"})).is_err());
+        assert!(run("fabric_learned_forget", json!({"folder": format!("{f}/nope"), "id": "a"})).is_err());
+    }
+
+    #[test]
+    fn cc_ops_validate_the_folder() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().to_str().unwrap();
+        assert!(run("fabric_cc_sessions", json!({"folder": "relative"})).is_err());
+        assert!(run("fabric_cc_transcript", json!({"folder": "relative", "id": "abc"})).is_err());
+        assert!(run("fabric_cc_transcript", json!({"folder": f, "id": "../x"})).is_err());
     }
 }
 
