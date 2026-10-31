@@ -1,11 +1,6 @@
 # Telegram message templates
 
-Planned, not built: no Telegram transport exists yet. Setup already checks the bot token and links
-the user id (`fabr check telegram-token`, `fabr telegram link`), but nothing sends or receives
-these messages. This file is the only copy of the wording for the five message kinds and the
-button rows. The callbacks write the record fields named under each kind, and the bot ignores any
-user id other than `telegram_user_id`. Placeholders in {braces} name a record
-field, an events.log value or the GUI link. Nothing else is used.
+The transport is `crates/fabr-core/src/telegram.rs`. The runner sends the messages below, polls `getUpdates` every 3 seconds, and writes answers and approvals through the same functions the GUI uses, with `by: telegram`. It has been tested against a mock Bot API only. This file is the only copy of the wording for the five message kinds and the button rows. The callbacks write the record fields named under each kind, and the bot ignores any user id other than `telegram_user_id`. Placeholders in {braces} name a record field, an events.log value or the GUI link. Nothing else is used. The app has no deep-link scheme, so `{gui_link}` is the line `Open fabr for details.`
 
 Every message starts with the title line `{title}` and ends with `{gui_link}`, the deep link to
 the task in the GUI. A bank value never appears in any message. Messages from a user id other than

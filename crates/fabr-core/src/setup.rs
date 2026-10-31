@@ -463,13 +463,19 @@ enum RunErr {
 }
 
 fn run_capture(path: &Path, args: &str, limit: Duration) -> Result<(bool, String), RunErr> {
-    let mut child = std::process::Command::new(path)
-        .args(args.split(' '))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| RunErr::Spawn(e.kind().to_string()))?;
+    let mut cmd = std::process::Command::new(path);
+    cmd.args(args.split(' ')).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+    let mut tries = 0;
+    let mut child = loop {
+        match cmd.spawn() {
+            Ok(c) => break c,
+            Err(e) if e.raw_os_error() == Some(26) && tries < 10 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Err(RunErr::Spawn(e.kind().to_string())),
+        }
+    };
     let deadline = Instant::now() + limit;
     let status = loop {
         match child.try_wait() {

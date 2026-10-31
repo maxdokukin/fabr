@@ -272,6 +272,14 @@ pub(crate) fn gui_record(disk: &TaskRecord, incoming: &TaskRecord) -> Result<Tas
     rec.by = disk.by.clone();
     rec.needs = disk.needs.clone();
     rec.log = disk.log.clone();
+    rec.sessions = disk.sessions.clone();
+    if rec.question.as_ref().map(|q| &q.id) != disk.question.as_ref().map(|q| &q.id) {
+        rec.question = disk.question.clone();
+    }
+    let digest = |r: &TaskRecord| r.approval.as_ref().and_then(|a| a.digest.clone());
+    if digest(incoming).is_some_and(|d| Some(d) != digest(disk)) {
+        return Err(FabrError::Conflict { message: "the plan changed since you opened it; review it again".into(), node: None });
+    }
     let keep = |changed: bool, kept: &str, new: &mut String| {
         if !changed {
             *new = kept.to_string();

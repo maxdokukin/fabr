@@ -16,19 +16,18 @@ Goal: one task goes from reminder to succeeded through Telegram, with a grant, a
 
 | Item | Status |
 |---|---|
-| Settings, secrets, six-screen setup wizard | built |
-| Task record: six states, flags, atomic writes with flock, validation | built |
-| GUI: tree, delegate, answers, approval, agents sheet | built |
+| Settings, secrets, setup wizard with a Claude Code check | built |
+| Task record: six states, flags, atomic writes with flock, validation, schema 7 with session ids | built |
+| GUI: tree, delegate, answers, approval, agents sheet, sessions and transcripts | built |
 | Orchestrator with resume, one running task per node, registry and heartbeat | built |
-| Definer, planner | built (model calls) |
-| Executor, evaluator | stubs: three file tools, allowlisted checks |
-| Notifier | stub: events log only |
-| Context gatherer | stub: no folder-chain walk |
-| Telegram bot, transport and buttons | planned |
+| Planner, executor and validator as Claude Code sessions | built |
+| Notifier: events log and Telegram notices | built |
+| Context gatherer: folder chain, rules, knowledge, learned answers | built |
+| Telegram bot, transport and buttons | built, tested against a mock only |
 | Task index | planned; the app polls a stamp |
-| Knowledge files, rules and preferences editors | planned |
+| Knowledge files with editors in node settings | built |
 | Data bank, fill at the sink, audit log, payment refusal | planned |
-| Learner (capture only) | stub |
+| Learner (capture only) | built |
 
 Exit test on a fresh machine: finish setup, hand-write a reminder and delegate it. Answer one batched question on Telegram, then approve plan, assertions and grants in one tap. The executor fills address fields on a web form and every assertion passes. The notice arrives on Telegram and in the app. A kill during execute resumes, and the audit log has one line per filled field.
 

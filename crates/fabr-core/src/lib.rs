@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod ccsession;
+pub mod cli_tasks;
 pub mod dto;
 pub mod error;
 pub mod fabric;

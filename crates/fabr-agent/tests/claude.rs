@@ -50,6 +50,7 @@ fn running(n: &Node) -> PathBuf {
         r.state = State::InProgress;
         r.step = Some(Step::Execute);
         r.plan = "### Inputs\n-\n### Outputs\n-\n### Steps\n1. work".into();
+        common::sign(r);
     });
     path
 }
@@ -111,14 +112,34 @@ fn a_pause_stops_the_run_and_resume_continues_the_same_session() {
 #[test]
 fn a_run_past_the_timeout_is_killed_and_is_a_stage_error() {
     let n = node();
-    n.fake.push(vec![init(), "@SLEEP 5".into()]);
-    let engine = ClaudeEngine::new(&n.fake.bin).with_timeout(Duration::from_secs(1));
+    let runs = n.space.join("registry").join("_runs.txt");
+    let turn = |id: &str, out: u64| {
+        json!({"type": "assistant", "message": {"id": id, "role": "assistant", "content": [{"type": "text", "text": "x"}],
+            "usage": {"input_tokens": 10, "cache_read_input_tokens": 5, "output_tokens": out}}})
+        .to_string()
+    };
+    n.fake.push(vec![
+        init(),
+        turn("m1", 3),
+        turn("m1", 7),
+        turn("m2", 4),
+        format!("@SH cp '{}' '{}'", runs.display(), n.dir.join("seen.txt").display()),
+        "@SLEEP 5".into(),
+    ]);
+    let engine = ClaudeEngine::new(&n.fake.bin).with_timeout(Duration::from_secs(1)).with_runs_file(&runs);
     let started = Instant::now();
     let run = engine.define(&DefineInput { cwd: &n.dir, resume: None, title: "t", context: "", answers: "" }, &mut NoWatch);
     assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
     let End::Failed(err) = run.end else { panic!("{:?}", run.end) };
     assert!(err.message().contains("ran longer than 1s"), "{}", err.message());
+    assert!(err.message().contains("after 2 turns (30 input and 11 output tokens; cost unknown)"), "{}", err.message());
+    assert_eq!((run.usage.turns, run.usage.input_tokens, run.usage.output_tokens), (2, 30, 11));
     assert!(run.session_id.is_some());
+    let seen = std::fs::read_to_string(n.dir.join("seen.txt")).unwrap();
+    let (group, owner) = seen.trim().split_once(' ').unwrap();
+    assert_eq!(owner, std::process::id().to_string());
+    assert!(group.parse::<u32>().unwrap() > 0);
+    assert!(!runs.exists(), "the run is removed from the file when it ends");
 }
 
 #[test]
@@ -143,7 +164,8 @@ fn the_read_only_executor_gets_no_write_tools() {
             assumptions: vec![],
             checks: vec![],
             requires: Default::default(),
-        })
+        });
+        common::sign(r);
     });
     let mut ctl = Ctl::new(&n.space, 10);
     ctl.harness.mode = fabr_core::setup::ExecuteMode::ReadOnly;
@@ -177,15 +199,13 @@ fn live_claude_code_runs_a_tiny_task_end_to_end() {
             break;
         }
         if rec.question.as_ref().is_some_and(|q| q.answer.is_none()) {
-            eprintln!("question: {}", rec.question.as_ref().unwrap().text);
+            let text = rec.question.as_ref().unwrap().text.clone();
+            eprintln!("question: {text}");
+            let reply =
+                if text.contains("Reply allow") { "allow" } else { "Use your best judgment: create hello.md with the single word hi." };
             edit(&path, |r| {
-                r.question.as_mut().unwrap().answer = Some(taskrec::Answer {
-                    value: Some("allow. Use your best judgment: create hello.md with the single word hi.".into()),
-                    replacement: None,
-                    granted: None,
-                    by: Some("gui".into()),
-                    at: None,
-                })
+                r.question.as_mut().unwrap().answer =
+                    Some(taskrec::Answer { value: Some(reply.into()), replacement: None, granted: None, by: Some("gui".into()), at: None })
             });
         }
         if let Err(e) = advance_with(&dir, &path, &ctl, &engine) {

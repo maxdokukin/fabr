@@ -16,14 +16,14 @@
 {#if onclick}
   <button type="button" class="row-item row-item--button" class:row-item--wrap={wrap} data-tone={tone} {disabled} {onclick}>
     {#if lead}{@render lead()}{/if}
-    {#if label}<span class="row-label">{label}{#if sub}<span class="row-sub">{sub}</span>{/if}</span>{/if}
+    {#if label}<span class="row-label"><span class="row-main">{label}</span>{#if sub}<span class="row-sub">{sub}</span>{/if}</span>{/if}
     {#if value}<span class="row-value">{value}</span>{/if}
     {#if children}{@render children()}{/if}
   </button>
 {:else}
   <label class="row-item" class:row-item--wrap={wrap} data-tone={tone}>
     {#if lead}{@render lead()}{/if}
-    {#if label}<span class="row-label">{label}{#if sub}<span class="row-sub">{sub}</span>{/if}</span>{/if}
+    {#if label}<span class="row-label"><span class="row-main">{label}</span>{#if sub}<span class="row-sub">{sub}</span>{/if}</span>{/if}
     {#if value}<span class="row-value">{value}</span>{/if}
     {#if children}{@render children()}{/if}
   </label>

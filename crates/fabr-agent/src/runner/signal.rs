@@ -18,8 +18,9 @@ pub fn install() -> &'static AtomicBool {
     #[cfg(unix)]
     // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
     unsafe {
-        signal(2, on_signal as *const () as usize);
-        signal(15, on_signal as *const () as usize);
+        for sig in [1, 2, 15] {
+            signal(sig, on_signal as *const () as usize);
+        }
     }
     &STOP
 }

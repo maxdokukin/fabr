@@ -1,6 +1,6 @@
 use crate::board::{Activity, Board, Extras};
 use crate::caps::{Harness, executor_rules, requires_of, valid_rule};
-use crate::claude::{denial_text, rule_for, tool_line};
+use crate::claude::{denial_text, is_session_id, rule_for, tool_line};
 use crate::engine::{
     DefineInput, DraftAssertion, End, Engine, EvaluateInput, ExecStatus, ExecuteInput, Judgement, PlanInput, PlanOut, Run, ToolUse, Watch,
 };
@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub const MAX_STAGE_ERRORS: u32 = 3;
+pub const MAX_SAME_DENIALS: usize = 3;
 pub const PLAN_SECTIONS: [&str; 3] = ["### Inputs", "### Outputs", "### Steps"];
 const GATHER_FILE_CAP: usize = 8 * 1024;
 const GATHER_TOTAL_CAP: usize = 32 * 1024;
@@ -29,6 +30,7 @@ pub struct Ctl {
     pub check_timeout_s: u64,
     pub harness: Harness,
     pub root: Option<PathBuf>,
+    pub max_task_usd: f64,
 }
 
 impl Ctl {
@@ -37,7 +39,7 @@ impl Ctl {
     }
 
     pub fn with_board(board: Arc<Board>, check_timeout_s: u64) -> Ctl {
-        Ctl { board, check_timeout_s, harness: Harness::standard(), root: None }
+        Ctl { board, check_timeout_s, harness: Harness::standard(), root: None, max_task_usd: 0.0 }
     }
 }
 
@@ -65,6 +67,14 @@ fn check_approval(rec: &TaskRecord) -> Result<Option<&'static str>, FabrError> {
         return Ok(Some("approval digest mismatch"));
     }
     Ok(None)
+}
+
+fn approval_problem(rec: &TaskRecord) -> Option<String> {
+    match check_approval(rec) {
+        Ok(None) => None,
+        Ok(Some(reason)) => Some(reason.to_string()),
+        Err(e) => Some(e.message()),
+    }
 }
 
 pub fn validate_plan(meta: &PlanMeta) -> Result<(), FabrError> {
@@ -342,6 +352,49 @@ impl Cx<'_> {
     fn mark(&self, rec: &TaskRecord, activity: Activity) {
         mark(self.ctl, self.node_dir, self.record_path, rec, activity);
     }
+
+    fn blocked(&self, rec: &mut TaskRecord, base: &mut TaskRecord, label: &str, resume: Option<&str>) -> Result<bool, FabrError> {
+        let cap = self.ctl.max_task_usd;
+        if cap > 0.0 && rec.cost_usd >= cap {
+            rec.state = State::Failed;
+            rec.step = None;
+            rec.waiting = false;
+            rec.verdict = None;
+            rec.requests.delegate = false;
+            append_log(&mut rec.log, label, &format!("stopped: task spend cap reached (${:.2} of ${cap:.2})", rec.cost_usd));
+            persist(self.record_path, rec, base)?;
+            forget(self.ctl, rec, self.record_path);
+            return Ok(true);
+        }
+        if !resume.is_some_and(|id| chat_running(self.node_dir, id)) {
+            return Ok(false);
+        }
+        let note = "waiting for a chat on this session to finish";
+        if log_message(rec.log.lines().last().unwrap_or(""), label) != Some(note) {
+            append_log(&mut rec.log, label, note);
+            persist(self.record_path, rec, base)?;
+        }
+        self.mark(rec, Activity::Queued);
+        Ok(true)
+    }
+}
+
+pub fn chat_running(node_dir: &Path, session: &str) -> bool {
+    if !is_session_id(session) {
+        return false;
+    }
+    let lock = node_dir.join(".fabric-space").join("chat").join(format!("{session}.lock"));
+    let Ok(text) = std::fs::read_to_string(&lock) else { return false };
+    let pid = text.split_whitespace().next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
+    if crate::pgroup::alive(pid) {
+        return true;
+    }
+    let _ = std::fs::remove_file(&lock);
+    false
+}
+
+fn session_of(id: &Option<String>) -> Option<String> {
+    id.clone().filter(|s| is_session_id(s))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -629,7 +682,7 @@ pub fn gather_bundle(node_dir: &Path, root: Option<&Path>) -> String {
                 lines.push(format!("{name}/"));
             } else if ent.metadata().is_ok_and(|m| m.len() <= 4096) {
                 let text = std::fs::read_to_string(&path).unwrap_or_default();
-                let preview: String = text.lines().next().unwrap_or("").trim().chars().take(120).collect();
+                let preview: String = text.lines().next().unwrap_or("").trim().trim_start_matches('#').trim().chars().take(120).collect();
                 lines.push(if preview.is_empty() { name } else { format!("{name}: {}", demote(&preview, 5)) });
             } else {
                 lines.push(name);
@@ -740,8 +793,11 @@ fn define_stage(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, engine: &i
         cx.mark(rec, Activity::Model);
         return Ok(());
     }
+    let (title, context, answers, resume) = (rec.title.clone(), rec.context.clone(), answers_text(rec), session_of(&rec.sessions.plan));
+    if cx.blocked(rec, base, "define", resume.as_deref())? {
+        return Ok(());
+    }
     cx.mark(rec, Activity::Model);
-    let (title, context, answers, resume) = (rec.title.clone(), rec.context.clone(), answers_text(rec), rec.sessions.plan.clone());
     let input = DefineInput { cwd: cx.node_dir, resume: resume.as_deref(), title: &title, context: &context, answers: &answers };
     let run = engine.define(&input, &mut Live { cx, rec, base, slot: Slot::Plan, label: "define", log_tools: false });
     let Some(draft) = settle(cx, rec, base, Slot::Plan, "define", run)? else { return Ok(()) };
@@ -801,10 +857,14 @@ fn run_plan(
 ) -> Result<Option<PlanOut>, FabrError> {
     let allowed = cx.ctl.harness.planning();
     let r = rec.clone();
+    let resume = session_of(&r.sessions.plan);
+    if cx.blocked(rec, base, "plan", resume.as_deref())? {
+        return Ok(None);
+    }
     let answers = answers_text(&r);
     let input = PlanInput {
         cwd: cx.node_dir,
-        resume: r.sessions.plan.as_deref(),
+        resume: resume.as_deref(),
         title: &r.title,
         context: &r.context,
         spec: &r.spec,
@@ -953,22 +1013,39 @@ pub fn denied_rules(log: &str, question_id: &str) -> Vec<String> {
     out
 }
 
+pub fn consents(reply: &str) -> bool {
+    matches!(reply.trim().to_ascii_lowercase().as_str(), "allow" | "allow." | "yes, allow" | "yes, allow.")
+}
+
+const OFFER: &str = "Reply allow to grant ";
+const OFFER_END: &str = ", or say what to do instead.";
+
+pub fn offered_rules(question: &str) -> Vec<String> {
+    let Some((_, rest)) = question.split_once(OFFER) else { return Vec::new() };
+    let list = rest.split(OFFER_END).next().unwrap_or("");
+    list.split('`').skip(1).step_by(2).filter(|r| valid_rule(r)).map(str::to_string).collect()
+}
+
 fn apply_allow(rec: &mut TaskRecord) {
-    let mut added: Vec<String> = Vec::new();
+    let mut grants: Vec<(String, Vec<String>)> = Vec::new();
     for q in &rec.answers {
-        let says_allow =
-            q.answer.as_ref().and_then(|a| a.value.as_deref()).is_some_and(|v| v.trim().to_ascii_lowercase().starts_with("allow"));
-        if !says_allow {
+        if !q.answer.as_ref().and_then(|a| a.value.as_deref()).is_some_and(consents) {
             continue;
         }
-        for rule in denied_rules(&rec.log, &q.id) {
-            let have = rec.plan_meta.as_ref().is_some_and(|m| m.tools.contains(&rule));
-            if !have && !added.contains(&rule) {
-                added.push(rule);
-            }
+        if rec.log.contains(&format!(" by user for {}; approval re-signed", q.id)) {
+            continue;
+        }
+        let denied = denied_rules(&rec.log, &q.id);
+        let rules: Vec<String> = offered_rules(&q.text)
+            .into_iter()
+            .filter(|r| denied.contains(r) && !rec.plan_meta.as_ref().is_some_and(|m| m.tools.contains(r)))
+            .filter(|r| !grants.iter().any(|(_, g)| g.contains(r)))
+            .collect();
+        if !rules.is_empty() {
+            grants.push((q.id.clone(), rules));
         }
     }
-    if added.is_empty() {
+    if grants.is_empty() {
         return;
     }
     let meta = rec.plan_meta.get_or_insert_with(|| PlanMeta {
@@ -978,13 +1055,49 @@ fn apply_allow(rec: &mut TaskRecord) {
         checks: Vec::new(),
         requires: Default::default(),
     });
-    meta.tools.extend(added.iter().cloned());
+    for (_, rules) in &grants {
+        meta.tools.extend(rules.iter().cloned());
+    }
     meta.requires = requires_of(meta);
     let digest = approval_digest(rec);
     if let Some(a) = rec.approval.as_mut() {
         a.digest = Some(digest);
     }
-    append_log(&mut rec.log, "execute", &format!("allowed {} by user; approval re-signed", added.join(", ")));
+    for (id, rules) in grants {
+        append_log(&mut rec.log, "execute", &format!("allowed {} by user for {id}; approval re-signed", rules.join(", ")));
+    }
+}
+
+pub fn denial_sets(log: &str) -> Vec<Vec<String>> {
+    let lines: Vec<&str> = log.lines().collect();
+    let mut out = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if !log_message(line, "execute").is_some_and(|m| m.starts_with("asked q")) {
+            continue;
+        }
+        let mut set: Vec<String> = lines[..i]
+            .iter()
+            .rev()
+            .map_while(|l| log_message(l, "execute").and_then(|m| m.strip_prefix("denied ")))
+            .map(str::to_string)
+            .collect();
+        set.sort();
+        set.dedup();
+        out.push(set);
+    }
+    out
+}
+
+fn unapprove(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, reason: &str) -> Result<(), FabrError> {
+    let digest = approval_digest(rec);
+    rec.approval = Some(Approval { status: "pending".into(), by: None, at: None, note: None, digest: Some(digest) });
+    rec.state = State::Defined;
+    rec.step = Some(Step::Approve);
+    rec.waiting = true;
+    append_log(&mut rec.log, "approve", &format!("{} before execute, reset to pending", clean_message(reason, 160)));
+    persist(cx.record_path, rec, base)?;
+    cx.mark(rec, Activity::Parked);
+    Ok(())
 }
 
 fn execute_stage(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, engine: &impl Engine) -> Result<(), FabrError> {
@@ -995,13 +1108,20 @@ fn execute_stage(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, engine: &
         return Ok(());
     }
     fold_question(rec);
+    if let Some(reason) = approval_problem(rec) {
+        return unapprove(cx, rec, base, &reason);
+    }
     apply_allow(rec);
+    let resume = session_of(&rec.sessions.execute);
+    if cx.blocked(rec, base, "execute", resume.as_deref())? {
+        return Ok(());
+    }
     let r = rec.clone();
     let allowed = executor_rules(r.plan_meta.as_ref());
     let answers = answers_text(&r);
     let input = ExecuteInput {
         cwd: cx.node_dir,
-        resume: r.sessions.execute.as_deref(),
+        resume: resume.as_deref(),
         title: &r.title,
         spec: &r.spec,
         plan: &r.plan,
@@ -1039,20 +1159,52 @@ fn execute_stage(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, engine: &
             if s.is_empty() { "The executor stopped and needs your input. What should it do?".to_string() } else { s.to_string() }
         })
     } else {
-        let mut whats: Vec<String> = Vec::new();
+        let have = allowed;
+        let (mut whats, mut lines, mut offer, mut granted) = (Vec::new(), Vec::new(), Vec::new(), false);
         for d in &denials {
-            let rule = rule_for(cx.node_dir, d);
-            let line = match &rule {
-                Some(rule) => format!("denied {rule}"),
-                None => format!("denied {} (no rule fabr can grant)", d.tool),
-            };
-            append_log(&mut rec.log, "execute", &clean_message(&line, 200));
             let what = denial_text(cx.node_dir, d);
+            let line = match rule_for(cx.node_dir, d) {
+                Some(rule) => {
+                    if have.contains(&rule) {
+                        granted = true;
+                    } else if !offer.contains(&rule) {
+                        offer.push(rule.clone());
+                    }
+                    format!("denied {rule}")
+                }
+                None => format!("denied {} (no rule fabr can grant): {what}", d.tool),
+            };
+            let line = clean_message(&line, 200);
+            if !lines.contains(&line) {
+                lines.push(line);
+            }
             if !whats.contains(&what) {
                 whats.push(what);
             }
         }
-        let mut text = format!("Claude Code was not allowed to {}. Reply allow to let it, or say what to do instead.", whats.join("; "));
+        let mut set: Vec<String> = lines.iter().filter_map(|l| l.strip_prefix("denied ")).map(str::to_string).collect();
+        set.sort();
+        let repeats = denial_sets(&rec.log).iter().rev().take_while(|s| **s == set).count();
+        for line in &lines {
+            append_log(&mut rec.log, "execute", line);
+        }
+        if repeats + 1 >= MAX_SAME_DENIALS {
+            persist(cx.record_path, rec, base)?;
+            return Err(FabrError::BadRequest(format!(
+                "Claude Code was denied the same thing {} times in a row: {}",
+                repeats + 1,
+                whats.join("; ")
+            )));
+        }
+        let mut text = format!("Claude Code was not allowed to {}.", whats.join("; "));
+        if !offer.is_empty() {
+            let rules: Vec<String> = offer.iter().map(|r| format!("`{r}`")).collect();
+            text.push_str(&format!(" {OFFER}{}{OFFER_END}", rules.join(", ")));
+        } else if granted {
+            text.push_str(" It is already allowed, so the rule did not cover what it tried. Say what to do instead.");
+        } else {
+            text.push_str(" fabr will not grant this. Say what to do instead.");
+        }
         if let Some(q) = question {
             text.push_str(&format!(" It also asks: {q}"));
         }
@@ -1077,6 +1229,9 @@ fn evaluate_stage(cx: &Cx, rec: &mut TaskRecord, base: &mut TaskRecord, engine: 
         let pass = !items.is_empty() && items.iter().all(|i| i.pass);
         (items, pass)
     } else {
+        if cx.blocked(rec, base, "evaluate", None)? {
+            return Ok(());
+        }
         cx.mark(rec, Activity::Model);
         let r = rec.clone();
         let lines: Vec<&str> = r.log.lines().filter(|l| l.contains(" execute: ")).collect();
@@ -1259,7 +1414,7 @@ mod answers_in_context {
         let far = out.find("From .:\n##### Root rule\nbe brief").unwrap();
         assert!(rules < near && near < far, "{out}");
         assert!(out.contains("#### Knowledge\nFrom a:\nthe printer is in room 2"), "{out}");
-        assert!(out.contains("#### Files\nnotes.md: ##### Notes\nsub/"), "{out}");
+        assert!(out.contains("#### Files\nnotes.md: Notes\nsub/"), "{out}");
         assert!(!out.contains("never seen") && !out.contains("above the root"), "{out}");
         assert!(!out.lines().any(|l| l.starts_with("## ")), "{out}");
         agents(&node, "knowledge.md", &"x".repeat(40_000));

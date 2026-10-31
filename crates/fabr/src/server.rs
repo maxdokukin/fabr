@@ -202,7 +202,7 @@ pub fn bind(port: u16) -> std::io::Result<(Arc<Server>, u16)> {
 
 pub fn is_long_op(url: &str) -> bool {
     let path = url.split('?').next().unwrap_or("");
-    matches!(path, "/api/fabric_check" | "/api/fabric_telegram_link")
+    matches!(path, "/api/fabric_check" | "/api/fabric_telegram_link" | "/api/fabric_cc_send")
 }
 
 pub fn spawn_workers(server: Arc<Server>, ws: Arc<Workspace>, ui: Arc<Ui>, threads: usize) -> Vec<std::thread::JoinHandle<()>> {

@@ -138,3 +138,14 @@ pub fn exec_out(status: &str, summary: &str) -> Value {
 pub fn verdict_out(pass: bool) -> Value {
     json!({"items": [{"id": "a1", "verdict": if pass { "pass" } else { "fail" }, "evidence": "greet.md holds hi"}]})
 }
+
+pub fn sign(r: &mut fabr_core::taskrec::TaskRecord) {
+    let digest = fabr_core::taskrec::approval_digest(r);
+    r.approval = Some(fabr_core::taskrec::Approval {
+        status: "approved".into(),
+        by: Some("gui".into()),
+        at: Some("2026-10-24T00:00:00Z".into()),
+        note: None,
+        digest: Some(digest),
+    });
+}

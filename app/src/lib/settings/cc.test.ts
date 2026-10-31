@@ -5,9 +5,11 @@ import { ago, newestFirst, nodeFolder, sessionTitle } from '../fabric/cc';
 import TranscriptView from '../fabric/TranscriptView.svelte';
 import ApprovalPanel from '../fabric/ApprovalPanel.svelte';
 import SessionsBlock from '../fabric/SessionsBlock.svelte';
+import TranscriptSheet from '../fabric/TranscriptSheet.svelte';
 import KnowledgeGroup from './KnowledgeGroup.svelte';
 
 const api = createMockApi({ latency: 0 });
+const ID2 = '3f2b8c1e-4d5a-4e6f-9a7b-0c1d2e3f4a5b';
 
 describe('mock claude code api', () => {
   it('lists sessions and reads a transcript with a limit', async () => {
@@ -17,6 +19,15 @@ describe('mock claude code api', () => {
     expect(t.entries.length).toBe(2);
     expect(t.truncated).toBe(true);
     await expect(api.fabricCcTranscript('/x', 'nope')).rejects.toThrow();
+  });
+  it('sends a message and the transcript shows it with the reply', async () => {
+    const r = await api.fabricCcSend({ folder: '/x', id: 'mock-session-1', message: 'What changed?' });
+    expect(r.reply.length).toBeGreaterThan(0);
+    expect(r.cost_usd).toBeGreaterThan(0);
+    const t = await api.fabricCcTranscript('/x', 'mock-session-1');
+    expect(t.entries.slice(-2).map((e) => [e.role, e.text])).toEqual([['user', 'What changed?'], ['assistant', r.reply]]);
+    await expect(api.fabricCcSend({ folder: '/x', id: 'nope', message: 'hi' })).rejects.toThrow();
+    await expect(api.fabricCcSend({ folder: '/x', id: 'mock-session-1', message: ' ' })).rejects.toThrow();
   });
   it('writes knowledge and forgets learned records', async () => {
     const k = await api.fabricKnowledgeWrite('/x', 'rules', 'Be brief.');
@@ -69,6 +80,22 @@ describe('render', () => {
     expect(one).toContain('session-discuss');
     const two = render(SessionsBlock, { props: { sessions: { plan: null, execute: ID, evaluate: null }, folder: '/x' } }).body;
     expect(two).not.toContain('session-discuss');
+  });
+});
+
+describe('composer', () => {
+  it('transcript sheet shows the composer, the read-only note and a disabled Send', () => {
+    const { body } = render(TranscriptSheet, { props: { folder: '/x', id: ID2, onclose: () => {} } });
+    for (const t of ['Ask this session…', 'Read-only: Claude Code can look at files here but not change them.', 'data-testid="send"']) expect(body).toContain(t);
+    expect(body).toMatch(/<button[^>]*data-testid="send"[^>]*disabled|<button[^>]*disabled[^>]*data-testid="send"/);
+    expect(body).not.toContain('Redo plan');
+  });
+  it('discuss mode keeps the redo hint in the sheet and both panels offer Discuss here', () => {
+    const { body } = render(TranscriptSheet, { props: { folder: '/x', id: ID2, discuss: true, onclose: () => {} } });
+    expect(body).toContain('press Redo plan');
+    const a = { approval: { status: 'pending' as const, by: null, at: null, note: null, digest: null }, grants: { requested: [], granted: [] }, planMeta: null, plan: 'P', assertions: [], onsubmit: async () => {}, folder: '/x', planSession: ID2 };
+    expect(render(ApprovalPanel, { props: a }).body).toContain('Discuss here');
+    expect(render(SessionsBlock, { props: { sessions: { plan: ID2, execute: null, evaluate: null }, folder: '/x' } }).body).toContain('session-discuss-here');
   });
 });
 

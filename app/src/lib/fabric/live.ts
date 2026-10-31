@@ -37,6 +37,7 @@ export async function createFabricSource(settings?: FabricSettingsRead | null, t
   let homeDir: string | null = null;
   if (isTauri()) homeDir = (await (await import('@tauri-apps/api/path')).homeDir()).replace(/\/+$/, '');
   const api = await createApi();
+  if (!isTauri()) homeDir = await api.fabricHome().then((h) => h.replace(/\/+$/, ''), () => null);
   const read = settings ?? (await api.fabricSettingsRead());
   const { roots, home } = pickLocations({ root: import.meta.env.VITE_FABRIC_ROOT, home: import.meta.env.VITE_FABRIC_HOME }, homeDir, read);
   return new TauriSource(api, treeRoots.length ? treeRoots : roots, home);

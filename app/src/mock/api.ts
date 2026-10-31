@@ -39,6 +39,7 @@ export function createMockApi(opts: MockOpts = {}): Api {
     { id: 'mock-session-1', title: 'Fix the login redirect', modified_at: new Date(Date.now() - 3600_000).toISOString(), messages: 6, bytes: 4200 },
     { id: 'mock-session-2', title: '', modified_at: new Date(Date.now() - 3 * 86400_000).toISOString(), messages: 2, bytes: 900 },
   ];
+  const ccExtra: Record<string, Transcript['entries']> = {};
   const ccTranscript = (id: string, limit: number): Transcript => {
     const all: Transcript['entries'] = [
       { role: 'user', text: 'The login page redirects to a blank screen.\nCan you look?' },
@@ -47,6 +48,7 @@ export function createMockApi(opts: MockOpts = {}): Api {
       { role: 'tool', text: 'npm test', tool: 'Bash' },
       { role: 'assistant', text: 'The redirect used a relative path. Fixed it.' },
     ];
+    all.push(...(ccExtra[id] ?? []));
     const entries = all.slice(-limit);
     return { id, title: ccSessions.find((s) => s.id === id)?.title ?? '', entries, truncated: entries.length < all.length };
   };
@@ -260,6 +262,14 @@ export function createMockApi(opts: MockOpts = {}): Api {
       await wait();
       if (!ccSessions.some((s) => s.id === id)) throw new ApiError(404, 'No such session');
       return ccTranscript(id, limit);
+    },
+    async fabricCcSend({ id, message }) {
+      await wait();
+      if (!message.trim()) throw new ApiError(400, 'Message is empty');
+      if (!ccSessions.some((s) => s.id === id)) throw new ApiError(404, 'No such session');
+      const reply = 'I looked at the files. The redirect handler is in src/auth/redirect.ts and the fix is small.';
+      (ccExtra[id] ??= []).push({ role: 'user', text: message }, { role: 'assistant', text: reply });
+      return { reply, cost_usd: 0.11 };
     },
     async fabricKnowledgeRead() { await wait(); return clone(know); },
     async fabricKnowledgeWrite(_f, kind: KnowledgeKind, text) { await wait(); know = { ...know, [kind]: text }; return clone(know); },

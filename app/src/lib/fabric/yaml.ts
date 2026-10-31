@@ -16,9 +16,10 @@ function parseFlow(s: string): unknown {
   const quoted = (): string => {
     const q = s[i++];
     let out = '';
-    while (i < s.length && s[i] !== q) {
-      if (q === '"' && s[i] === '\\') { i++; out += s[i] === 'n' ? '\n' : s[i]; i++; }
-      else if (q === "'" && s[i] === "'" && s[i + 1] === "'") { out += "'"; i += 2; }
+    while (i < s.length) {
+      if (q === "'" && s[i] === "'" && s[i + 1] === "'") { out += "'"; i += 2; }
+      else if (s[i] === q) break;
+      else if (q === '"' && s[i] === '\\') { i++; out += s[i] === 'n' ? '\n' : s[i]; i++; }
       else out += s[i++];
     }
     if (s[i] !== q) throw new Error(`unterminated string in: ${s}`);

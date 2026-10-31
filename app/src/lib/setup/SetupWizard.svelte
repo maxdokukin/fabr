@@ -124,6 +124,7 @@
 </script>
 
 <Page title={loadError === null ? TITLES[step] : 'Setup'}>
+  <div class="setup">
   {#if loadError !== null}
     <Group footer={loadError} error><Row label="Could not load settings" /></Group>
   {:else if !settings}
@@ -171,8 +172,12 @@
       {#if step !== 'done'}<Button variant="primary" disabled={!passed || busy} onclick={() => go(next(step))}>Next</Button>{/if}
     </div>
   {/if}
+  </div>
 </Page>
 
 <style>
-  .setup-nav { display: flex; gap: 8px; justify-content: space-between; margin: 16px; }
+  .setup { width: 100%; max-width: 560px; margin: 0 auto; display: grid; gap: 0; }
+  .setup :global(.btn--primary) { margin-top: 12px; }
+  .setup-nav { display: flex; gap: 8px; justify-content: space-between; align-items: center; margin: 16px 0 0; }
+  .setup-nav :global(.btn--primary) { margin-top: 0; margin-left: auto; }
 </style>

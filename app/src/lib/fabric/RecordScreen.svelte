@@ -18,6 +18,7 @@
   import StateRibbon from './StateRibbon.svelte';
   import { minuteOf } from '../model';
   import type { TaskRecord } from './types';
+  import Prose from './Prose.svelte';
 
   let { record, name, backLabel = 'Records', agent, onback, onanswer, onapprove, onrequest, onedit, onfields, onsuspend, onunsuspend, now = new Date(), onreload, readonly = false, folder }: {
     record: TaskRecord;
@@ -225,7 +226,7 @@
         {@render sechead('context')}
         {@render editor('context')}
         {#if editing === 'context'}{:else if ctx.own}<p class="txt">{ctx.own}</p>{:else}<p class="slot">Context: written by you when the task is created</p>{/if}
-        {#if ctx.gathered}<h4 class="sub">Gathered</h4><p class="txt">{ctx.gathered}</p>
+        {#if ctx.gathered}<h4 class="sub">Gathered</h4><div class="txt"><Prose text={ctx.gathered} /></div>
         {:else}<p class="slot">Gathered: appended by the gatherer during gather</p>{/if}
       </div>
     </Group>
@@ -275,7 +276,7 @@
       <div class="blk">
         {@render sechead('plan')}
         {@render editor('plan')}
-        {#if editing === 'plan'}{:else if s.plan}<p class="txt">{s.plan}</p>{:else}<p class="slot">Plan: written by the planner during plan</p>{/if}
+        {#if editing === 'plan'}{:else if s.plan}<div class="txt"><Prose text={s.plan} /></div>{:else}<p class="slot">Plan: written by the planner during plan</p>{/if}
         {#if pm}
           <p class="dim">reversibility: <b class:warn={pm.reversibility === 'irreversible'}>{pm.reversibility}</b> · tools: {pm.tools.join(', ') || 'none'}</p>
           {#if pm.assumptions.length}

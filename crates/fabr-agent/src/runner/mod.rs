@@ -13,7 +13,7 @@ use crate::board::{Activity, Board, Extras};
 use crate::claude::{ClaudeEngine, resolve_bin};
 use crate::lifecycle::{Ctl, advance_with, apply_redo, task_path_key, trailing_error};
 use crate::now_utc;
-use crate::settings::{check_timeout_s, execute_timeout_s, max_budget_usd};
+use crate::settings::{check_timeout_s, execute_timeout_s, max_budget_usd, max_task_usd};
 use crate::state::{
     append_log, clean_message, driven, is_terminal, parked, pending_tail, stage_label, state_name, suspend_expired, suspended_now,
 };
@@ -121,11 +121,13 @@ impl Runner {
         let engine = ClaudeEngine::new(&gate.claude_bin)
             .with_model(&gate.model, &gate.effort)
             .with_timeout(Duration::from_secs(execute_timeout_s(&space)))
-            .with_budget(max_budget_usd(&space));
+            .with_budget(max_budget_usd(&space))
+            .with_runs_file(runs_file(&space));
         let board = Board::new(&space, gate.heartbeat_interval_s, Some(calls));
         let mut ctl = Ctl::with_board(board.clone(), check_timeout_s(&space));
         ctl.harness = crate::caps::load(ctx)?;
         ctl.root = Some(gate.default_folder.clone());
+        ctl.max_task_usd = max_task_usd(&space);
         Ok(Runner {
             events: Events::new(&space),
             space,
@@ -184,6 +186,9 @@ impl Runner {
             self.hb_interval_s
         ));
         self.event_cutoff = self.events.newest_at();
+        for line in crate::claude::reap_orphans(&runs_file(&self.space)) {
+            self.sink.info(line);
+        }
         self.clean_stale();
         let hb = heartbeat::Heartbeat::new(&self.space, self.hb_interval_s);
         self.beating = Some(heartbeat::Beating::spawn(hb, self.board.clone())?);
@@ -659,6 +664,10 @@ impl Runner {
         self.process(&new_path);
         Ok(())
     }
+}
+
+pub fn runs_file(space: &Path) -> PathBuf {
+    space.join("registry").join("_runs.txt")
 }
 
 fn last_marker_suspended(log: &str) -> bool {

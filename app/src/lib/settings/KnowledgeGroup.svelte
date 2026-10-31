@@ -19,7 +19,7 @@
   {#each FIELDS as f (f.kind)}
     <div class="kf">
       <span class="kf__label">{f.label}</span>
-      <textarea class="kf__text" rows="4" aria-label={f.label} placeholder={f.hint} value={text(f.kind)} oninput={(e) => (edits[f.kind] = e.currentTarget.value)} onblur={() => text(f.kind) !== k[f.kind] && onsave(f.kind, text(f.kind))}></textarea>
+      <textarea class="kf__text" rows="4" aria-label={f.label} value={text(f.kind)} oninput={(e) => (edits[f.kind] = e.currentTarget.value)} onblur={() => text(f.kind) !== k[f.kind] && onsave(f.kind, text(f.kind))}></textarea>
       <span class="hint">{f.hint}</span>
     </div>
   {/each}

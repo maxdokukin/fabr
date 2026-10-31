@@ -81,6 +81,44 @@ enum Cmd {
         #[arg(long, help = "Also print the log to stderr")]
         verbose: bool,
     },
+    #[command(about = "List task records (state, step, what they wait for) under PATH or the default folder")]
+    Status {
+        #[arg(long)]
+        json: bool,
+        path: Option<PathBuf>,
+    },
+    #[command(about = "Show one task record: question, plan, assertions, verdict, cost, Claude Code sessions")]
+    Show { record: String },
+    #[command(about = "Ask the agent to take a reminder on")]
+    Delegate { record: String },
+    #[command(about = "Answer the open question of a task")]
+    Answer {
+        record: String,
+        #[arg(required = true)]
+        text: Vec<String>,
+    },
+    #[command(about = "Ask a task's Claude Code session a question, read-only")]
+    Ask {
+        record: String,
+        #[arg(long, default_value = "plan", value_parser = ["plan", "execute", "evaluate"])]
+        role: String,
+        #[arg(required = true)]
+        text: Vec<String>,
+    },
+    #[command(about = "Approve the pending plan")]
+    Approve { record: String },
+    #[command(about = "Refuse the pending plan")]
+    Refuse {
+        record: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    #[command(about = "Cancel a running task")]
+    Cancel { record: String },
+    #[command(about = "Pause a task after its current step")]
+    Pause { record: String },
+    #[command(about = "Resume a paused task")]
+    Resume { record: String },
     #[command(about = "List items")]
     Ls {
         #[arg(long, conflicts_with_all = ["overdue", "wip"])]
@@ -329,6 +367,46 @@ fn cmd_remove(path: PathBuf, yes: bool) -> Result<(), FabrError> {
     Ok(())
 }
 
+fn cmd_status(path: Option<PathBuf>, json: bool) -> Result<(), FabrError> {
+    use fabr_core::cli_tasks;
+    let ctx = fabr_core::setup::Ctx::from_env();
+    let root = match path {
+        Some(p) => p,
+        None => cli_tasks::default_root(&ctx)?,
+    };
+    let rows = cli_tasks::status(&root, &ctx)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rows).map_err(|e| FabrError::Io(e.to_string()))?);
+    } else {
+        print!("{}", cli_tasks::status_text(&rows));
+    }
+    Ok(())
+}
+
+fn cmd_task(cmd: Cmd) -> Result<(), FabrError> {
+    use fabr_core::cli_tasks as t;
+    type Run = Box<dyn FnOnce(&Path) -> Result<String, FabrError>>;
+    let ctx = fabr_core::setup::Ctx::from_env();
+    let (record, run): (String, Run) = match cmd {
+        Cmd::Show { record } => (record, Box::new(t::show)),
+        Cmd::Delegate { record } => (record, Box::new(t::delegate)),
+        Cmd::Answer { record, text } => (record, Box::new(move |p| t::answer(p, &text.join(" ")))),
+        Cmd::Ask { record, role, text } => {
+            let ctx = ctx.clone();
+            (record, Box::new(move |p| t::ask(&ctx, p, &role, &text.join(" "))))
+        }
+        Cmd::Approve { record } => (record, Box::new(t::approve)),
+        Cmd::Refuse { record, note } => (record, Box::new(move |p| t::refuse(p, note))),
+        Cmd::Cancel { record } => (record, Box::new(|p| t::request(p, "cancel"))),
+        Cmd::Pause { record } => (record, Box::new(|p| t::request(p, "pause"))),
+        Cmd::Resume { record } => (record, Box::new(|p| t::request(p, "resume"))),
+        _ => unreachable!(),
+    };
+    let out = run(&t::resolve(&ctx, &record)?)?;
+    print!("{}", if out.ends_with('\n') { out } else { format!("{out}\n") });
+    Ok(())
+}
+
 fn cmd_sample(dir: &Path) -> Result<(), FabrError> {
     let n = write_sample(dir).map_err(|e| FabrError::Io(format!("{}: {e}", dir.display())))?;
     println!("wrote {n} nodes to {}", dir.display());
@@ -364,6 +442,16 @@ fn main() -> ExitCode {
         Cmd::Add { path, title, due, pri } => cmd_add(path, title, due, pri),
         Cmd::Import { path } => cmd_import(path),
         Cmd::Ls { all, overdue, wip, path } => cmd_ls(path, all, overdue, wip),
+        Cmd::Status { json, path } => cmd_status(path, json),
+        c @ (Cmd::Show { .. }
+        | Cmd::Delegate { .. }
+        | Cmd::Answer { .. }
+        | Cmd::Ask { .. }
+        | Cmd::Approve { .. }
+        | Cmd::Refuse { .. }
+        | Cmd::Cancel { .. }
+        | Cmd::Pause { .. }
+        | Cmd::Resume { .. }) => cmd_task(c),
         Cmd::Check { .. } | Cmd::Telegram { .. } | Cmd::Agent { .. } => unreachable!(),
     };
     match r {

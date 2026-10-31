@@ -4,6 +4,7 @@ pub mod claude;
 pub mod engine;
 pub mod lifecycle;
 pub mod link;
+pub mod pgroup;
 pub mod run;
 pub mod runner;
 pub mod settings;

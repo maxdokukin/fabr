@@ -4,8 +4,10 @@
   import Segmented from '../ui/Segmented.svelte';
   import type { ApprovalDecision } from './approval';
   import type { Approval, Assertion, Grants, PlanMeta, Scope } from './types';
-  import { DISCUSS_HINT, DISCUSS_LABEL, openSession } from './sessions';
+  import TranscriptSheet from './TranscriptSheet.svelte';
+  import { DISCUSS_HERE_LABEL, DISCUSS_HINT, DISCUSS_LABEL, openSession } from './sessions';
   import { ConflictError } from './write';
+  import Prose from './Prose.svelte';
 
   let { approval, grants, planMeta, plan, assertions, onsubmit, onreload, folder = '', planSession = null, onredo }: {
     approval: Approval;
@@ -28,6 +30,7 @@
   let error = $state('');
   let conflict = $state(false);
   let discussed = $state('');
+  let discussHere = $state(false);
 
   const scopeOf = (f: string): Scope => scopes[f] ?? 'task';
   const scopeOptions: { value: Scope; label: string }[] = [
@@ -82,7 +85,7 @@
     {#if approval.status === 'pending'}
       <section>
         <h4>Plan</h4>
-        {#if plan}<p class="txt">{plan}</p>{:else}<p class="dim">No plan text yet.</p>{/if}
+        {#if plan}<div class="txt"><Prose text={plan} /></div>{:else}<p class="dim">No plan text yet.</p>{/if}
       </section>
 
       <section>
@@ -132,6 +135,7 @@
         <section>
           <div class="row">
             <Button variant="tint" data-testid="discuss-plan" onclick={discuss}>{DISCUSS_LABEL}</Button>
+            <Button variant="tint" data-testid="discuss-here" onclick={() => (discussHere = true)}>{DISCUSS_HERE_LABEL}</Button>
             {#if onredo}<Button variant="tint" disabled={busy} data-testid="approval-redo-plan" onclick={onredo}>Redo plan</Button>{/if}
           </div>
           <p class="dim" data-testid="discuss-hint">{discussed ? `${discussed} ` : ''}{DISCUSS_HINT}</p>
@@ -156,13 +160,14 @@
         {/if}
       {/if}
     {:else}
-      <p class="txt" data-testid="decided"><b class:warn={approval.status === 'refused'}>{approval.status}</b>{#if approval.by} by {approval.by}{/if}{#if approval.at} at {approval.at}{/if}</p>
+      <p class="txt" data-testid="decided"><b class:warn={approval.status === 'refused'}>{approval.status}</b>{#if approval.by}{" "}by {approval.by}{/if}{#if approval.at}{" "}at {approval.at}{/if}</p>
       {#if approval.note}<p class="dim">Note: {approval.note}</p>{/if}
       <p class="txt">granted: {grants.granted.map(describe).join(', ') || 'none'}</p>
       <p class="dim">requested: {grants.requested.join(', ') || 'none'}</p>
     {/if}
   </div>
 </Group>
+{#if discussHere && planSession}<TranscriptSheet {folder} id={planSession} discuss={true} onclose={() => (discussHere = false)} />{/if}
 
 <style>
   .ap { padding: 10px 16px; display: flex; flex-direction: column; gap: 12px; }

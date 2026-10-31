@@ -834,14 +834,21 @@ fn the_whole_pipeline_runs_through_claude_code_sessions() {
     assert_eq!(e.fake.flag(4, "--permission-mode").as_deref(), Some("acceptEdits"));
     assert_eq!(e.fake.flag(4, "--permission-prompts").as_deref(), Some("none"));
     assert_eq!(e.fake.flag(4, "--allowedTools").as_deref(), Some("Read Glob Grep Write"));
+    assert!(e.fake.flag(4, "--disallowedTools").unwrap().starts_with("Edit(./.fabric-space/**) Edit(.fabric-space/**) Write("));
+    assert!(!e.fake.has(1, "--disallowedTools"));
     assert!(!e.fake.has(4, "--tools"));
     assert!(e.fake.stdin(4).contains("Approved plan:") && e.fake.stdin(4).contains("### Steps"));
-    for line in ["execute: Read notes.md", "execute: Bash npm install left-pad", "execute: denied Bash(npm install:*)", "execute: asked q2"]
+    for line in
+        ["execute: Read notes.md", "execute: Bash npm install left-pad", "execute: denied Bash(npm install left-pad)", "execute: asked q2"]
     {
         assert!(rec.log.contains(line), "{line}: {}", rec.log);
     }
     let q = rec.question.as_ref().unwrap();
-    assert!(q.text.contains("run `npm install left-pad`") && q.text.contains("Reply allow"), "{}", q.text);
+    assert!(
+        q.text.contains("run `npm install left-pad`") && q.text.contains("Reply allow to grant `Bash(npm install left-pad)`"),
+        "{}",
+        q.text
+    );
     assert_eq!(registry_doc(&e)["waiting"].as_str(), Some("question"));
 
     answer(&path, "allow");
@@ -849,10 +856,10 @@ fn the_whole_pipeline_runs_through_claude_code_sessions() {
     let rec = load(&path);
     assert_eq!((rec.state, rec.step), (State::Succeeded, None), "{}", rec.log);
     assert_eq!(e.fake.flag(5, "--resume").as_deref(), Some(executor.as_str()));
-    assert_eq!(e.fake.flag(5, "--allowedTools").as_deref(), Some("Read Glob Grep Write Bash(npm install:*)"));
+    assert_eq!(e.fake.flag(5, "--allowedTools").as_deref(), Some("Read Glob Grep Write Bash(npm install left-pad)"));
     assert!(e.fake.stdin(5).contains("Continue the task") && e.fake.stdin(5).contains("User answered: allow"));
-    assert!(rec.log.contains("execute: allowed Bash(npm install:*) by user; approval re-signed"), "{}", rec.log);
-    assert_eq!(rec.plan_meta.as_ref().unwrap().tools, ["Write", "Bash(npm install:*)"]);
+    assert!(rec.log.contains("execute: allowed Bash(npm install left-pad) by user for q2; approval re-signed"), "{}", rec.log);
+    assert_eq!(rec.plan_meta.as_ref().unwrap().tools, ["Write", "Bash(npm install left-pad)"]);
     assert_eq!(rec.approval.as_ref().unwrap().digest.as_deref(), Some(taskrec::approval_digest(&rec).as_str()));
     assert_eq!(std::fs::read_to_string(e.proj.join("greet.md")).unwrap(), "hi");
     let validator = rec.sessions.evaluate.clone().unwrap();
@@ -897,5 +904,27 @@ fn a_run_that_hits_the_spend_cap_fails_the_task_without_retries() {
     assert!(rec.log.contains("define: stopped: spend cap reached: Claude Code stopped after $0.52"), "{}", rec.log);
     assert_eq!(e.fake.calls(), 1);
     assert!((rec.cost_usd - 0.52).abs() < 1e-9, "{}", rec.cost_usd);
+    r.shutdown(true);
+}
+
+#[test]
+fn start_kills_process_groups_left_by_a_dead_runner() {
+    use std::os::unix::process::CommandExt;
+    let e = ready();
+    let mut orphan = std::process::Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
+    let file = fabr_agent::runner::runs_file(&e.ctx.space());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, format!("{} 2147483000\n2147483001 2147483000\n", orphan.id())).unwrap();
+    let (mut r, lines) = runner(&e);
+    r.start().unwrap();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(4);
+    while orphan.try_wait().unwrap().is_none() && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(orphan.try_wait().unwrap().is_some(), "the orphan still runs");
+    let logged = lines.lock().unwrap().join("\n");
+    assert!(logged.contains(&format!("killed leftover Claude Code process group {} from runner 2147483000", orphan.id())), "{logged}");
+    assert!(!logged.contains("2147483001"), "{logged}");
+    assert!(!file.exists());
     r.shutdown(true);
 }

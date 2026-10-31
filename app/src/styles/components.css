@@ -558,6 +558,11 @@ input.mrow__key { text-transform: none; color: var(--label); }
 .row-item[data-tone="tint"] .row-label { flex: none; }
 .row-label { flex: none; display: grid; min-width: 0; }
 .row-item--button > .row-label, .row-item:has(> .row-chev) > .row-label { flex: 1; }
+.row-item:has(> .btn) > .row-label { flex: 1; }
+.row-item:not(.row-item--wrap):has(> .btn) .row-main { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-item:has(> .sess-actions) { flex-wrap: wrap; padding-top: 8px; padding-bottom: 6px; }
+.row-item:has(> .sess-actions) > .row-label { flex: 1 1 100%; }
+.sess-actions { flex: 1 1 100%; display: flex; flex-wrap: wrap; gap: 2px 8px; margin-left: -10px; }
 .row-sub { font-size: var(--fs-12); color: var(--label-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .row-value { margin-left: auto; color: var(--label-2); }
 .row-chev { color: var(--label-3); flex: none; }

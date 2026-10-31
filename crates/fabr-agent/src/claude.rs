@@ -38,6 +38,7 @@ pub struct ClaudeEngine {
     pub effort: String,
     pub timeout: Duration,
     pub max_budget_usd: f64,
+    pub runs_file: Option<PathBuf>,
 }
 
 pub const SPEND_CAP: &str = "spend cap reached";
@@ -50,6 +51,7 @@ impl ClaudeEngine {
             effort: String::new(),
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_S),
             max_budget_usd: 0.0,
+            runs_file: None,
         }
     }
 
@@ -68,6 +70,27 @@ impl ClaudeEngine {
         self.max_budget_usd = if usd.is_finite() && usd > 0.0 { usd } else { 0.0 };
         self
     }
+
+    pub fn with_runs_file(mut self, file: impl Into<PathBuf>) -> ClaudeEngine {
+        self.runs_file = Some(file.into());
+        self
+    }
+}
+
+pub const STATE_DIR: &str = ".fabric-space";
+
+pub fn state_deny_rules() -> Vec<String> {
+    let mut out = Vec::new();
+    for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
+        for dir in ["./.fabric-space/**", ".fabric-space/**"] {
+            out.push(format!("{tool}({dir})"));
+        }
+    }
+    out
+}
+
+pub fn is_session_id(id: &str) -> bool {
+    id.len() == 36 && id.char_indices().all(|(i, c)| if matches!(i, 8 | 13 | 18 | 23) { c == '-' } else { c.is_ascii_hexdigit() })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,7 +148,7 @@ pub fn args(engine: &ClaudeEngine, call: &Call, session: &str) -> Vec<String> {
     let mut out: Vec<String> = vec!["-p".into(), "--output-format".into(), "stream-json".into(), "--verbose".into()];
     out.push("--json-schema".into());
     out.push(call.schema.to_string());
-    match call.resume {
+    match call.resume.filter(|id| is_session_id(id)) {
         Some(id) => out.extend(["--resume".into(), id.to_string()]),
         None => out.extend(["--session-id".into(), session.to_string()]),
     }
@@ -140,6 +163,9 @@ pub fn args(engine: &ClaudeEngine, call: &Call, session: &str) -> Vec<String> {
     }
     let allowed = if call.allowed.is_empty() { READ_ONLY_TOOLS.replace(',', " ") } else { call.allowed.join(" ") };
     out.extend(["--allowedTools".into(), allowed]);
+    if matches!(call.role, Role::Executor { .. }) {
+        out.extend(["--disallowedTools".into(), state_deny_rules().join(" ")]);
+    }
     if !engine.model.is_empty() {
         out.extend(["--model".into(), engine.model.clone()]);
     }
@@ -167,14 +193,10 @@ pub fn session<T: DeserializeOwned>(engine: &ClaudeEngine, call: &Call, watch: &
         };
     }
     let fresh = new_session_id();
-    let session = call.resume.unwrap_or(&fresh).to_string();
+    let session = call.resume.filter(|id| is_session_id(id)).unwrap_or(&fresh).to_string();
     let mut cmd = Command::new(&engine.bin);
     cmd.args(args(engine, call, &session)).current_dir(call.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
+    crate::pgroup::own_group(&mut cmd);
     let mut tries = 0;
     let mut child = loop {
         match cmd.spawn() {
@@ -186,7 +208,7 @@ pub fn session<T: DeserializeOwned>(engine: &ClaudeEngine, call: &Call, watch: &
             Err(e) => return Run::failed(FabrError::Io(format!("could not start Claude Code ({}): {e}", engine.bin.display()))),
         }
     };
-    let _live = Live::add(child.id());
+    let _live = Live::add(child.id(), engine.runs_file.clone());
     if let Some(mut stdin) = child.stdin.take() {
         let prompt = call.prompt.clone();
         std::thread::spawn(move || {
@@ -207,11 +229,12 @@ pub fn session<T: DeserializeOwned>(engine: &ClaudeEngine, call: &Call, watch: &
     let stderr = child.stderr.take().map(|s| std::thread::spawn(move || capped(s)));
     let mut run: Run<T> = Run { session_id: None, cost_usd: 0.0, usage: Usage::default(), denials: Vec::new(), end: End::Stopped };
     let mut result: Option<Value> = None;
+    let mut turns: Vec<(String, u64, u64)> = Vec::new();
     let deadline = Instant::now() + engine.timeout;
     let mut polled = Instant::now();
     loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(line) => on_line(&line, &mut run, &mut result, watch),
+            Ok(line) => on_line(&line, &mut run, &mut result, &mut turns, watch),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
@@ -228,7 +251,14 @@ pub fn session<T: DeserializeOwned>(engine: &ClaudeEngine, call: &Call, watch: &
         }
         if Instant::now() >= deadline {
             kill(&mut child);
-            run.end = End::Failed(FabrError::Timeout(format!("Claude Code ran longer than {}s and was stopped", engine.timeout.as_secs())));
+            let u = &run.usage;
+            run.end = End::Failed(FabrError::Timeout(format!(
+                "Claude Code ran longer than {}s and was stopped after {} turns ({} input and {} output tokens; cost unknown)",
+                engine.timeout.as_secs(),
+                u.turns,
+                u.input_tokens,
+                u.output_tokens
+            )));
             return run;
         }
     }
@@ -254,7 +284,7 @@ pub fn session<T: DeserializeOwned>(engine: &ClaudeEngine, call: &Call, watch: &
     run
 }
 
-fn on_line<T>(line: &str, run: &mut Run<T>, result: &mut Option<Value>, watch: &mut dyn Watch) {
+fn on_line<T>(line: &str, run: &mut Run<T>, result: &mut Option<Value>, turns: &mut Vec<(String, u64, u64)>, watch: &mut dyn Watch) {
     let Ok(v) = serde_json::from_str::<Value>(line) else { return };
     match v["type"].as_str() {
         Some("system") if v["subtype"].as_str() == Some("init") => {
@@ -264,6 +294,7 @@ fn on_line<T>(line: &str, run: &mut Run<T>, result: &mut Option<Value>, watch: &
             }
         }
         Some("assistant") => {
+            tally(&v["message"], turns, &mut run.usage);
             for block in v["message"]["content"].as_array().map(Vec::as_slice).unwrap_or_default() {
                 if block["type"].as_str() != Some("tool_use") {
                     continue;
@@ -278,6 +309,20 @@ fn on_line<T>(line: &str, run: &mut Run<T>, result: &mut Option<Value>, watch: &
         Some("result") => *result = Some(v),
         _ => {}
     }
+}
+
+fn tally(message: &Value, turns: &mut Vec<(String, u64, u64)>, usage: &mut Usage) {
+    let u = &message["usage"];
+    let n = |k: &str| u[k].as_u64().unwrap_or(0);
+    let input = n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens");
+    let output = n("output_tokens");
+    let id = message["id"].as_str().map(str::to_string).unwrap_or_else(|| format!("#{}", turns.len()));
+    match turns.iter_mut().find(|t| t.0 == id) {
+        Some(t) => (t.1, t.2) = (t.1.max(input), t.2.max(output)),
+        None => turns.push((id, input, output)),
+    }
+    *usage =
+        Usage { turns: turns.len() as u64, input_tokens: turns.iter().map(|t| t.1).sum(), output_tokens: turns.iter().map(|t| t.2).sum() };
 }
 
 fn finish<T: DeserializeOwned>(code: Option<i32>, result: Option<Value>, err_tail: &str, run: &mut Run<T>) -> End<T> {
@@ -367,22 +412,85 @@ pub fn strict<T: DeserializeOwned>(engine: &ClaudeEngine, call: &Call, watch: &m
     second
 }
 
-static LIVE: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+type Tracked = (u32, Option<PathBuf>);
+
+static LIVE: Mutex<Vec<Tracked>> = Mutex::new(Vec::new());
 static ABORT: AtomicBool = AtomicBool::new(false);
 
-struct Live(u32);
+struct Live(u32, Option<PathBuf>);
 
 impl Live {
-    fn add(pid: u32) -> Live {
-        LIVE.lock().unwrap_or_else(PoisonError::into_inner).push(pid);
-        Live(pid)
+    fn add(pid: u32, file: Option<PathBuf>) -> Live {
+        let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
+        live.push((pid, file.clone()));
+        if let Some(f) = &file {
+            write_runs(f, &live);
+        }
+        Live(pid, file)
     }
 }
 
 impl Drop for Live {
     fn drop(&mut self) {
-        LIVE.lock().unwrap_or_else(PoisonError::into_inner).retain(|p| *p != self.0);
+        let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
+        live.retain(|p| p.0 != self.0);
+        if let Some(f) = &self.1 {
+            write_runs(f, &live);
+        }
     }
+}
+
+fn run_lines(file: &Path) -> Vec<(u32, u32)> {
+    let text = std::fs::read_to_string(file).unwrap_or_default();
+    text.lines()
+        .filter_map(|l| {
+            let mut p = l.split_whitespace().map(|w| w.parse::<u32>().ok());
+            Some((p.next()??, p.next()??))
+        })
+        .collect()
+}
+
+fn save_runs(file: &Path, lines: &[(u32, u32)]) {
+    let text: String = lines.iter().map(|(g, o)| format!("{g} {o}\n")).collect();
+    let res = if text.is_empty() {
+        std::fs::remove_file(file).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) })
+    } else {
+        crate::runner::write_atomic(file, &text)
+    };
+    if let Err(e) = res {
+        log::warn!("could not update {}: {e}", file.display());
+    }
+}
+
+fn write_runs(file: &Path, live: &[Tracked]) {
+    let me = std::process::id();
+    let mut lines: Vec<(u32, u32)> = run_lines(file).into_iter().filter(|(_, o)| *o != me && crate::pgroup::alive(*o)).collect();
+    lines.extend(live.iter().filter(|t| t.1.as_deref() == Some(file)).map(|t| (t.0, me)));
+    save_runs(file, &lines);
+}
+
+pub fn reap_orphans(file: &Path) -> Vec<String> {
+    let me = std::process::id();
+    let mut kept = Vec::new();
+    let mut out = Vec::new();
+    for (group, owner) in run_lines(file) {
+        if owner == me || crate::pgroup::alive(owner) {
+            kept.push((group, owner));
+            continue;
+        }
+        if !crate::pgroup::group_alive(group) {
+            continue;
+        }
+        crate::pgroup::signal_group(group, crate::pgroup::TERM);
+        let until = Instant::now() + Duration::from_secs(2);
+        while crate::pgroup::group_alive(group) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        crate::pgroup::signal_group(group, crate::pgroup::KILL);
+        out.push(format!("killed leftover Claude Code process group {group} from runner {owner}"));
+    }
+    save_runs(file, &kept);
+    out
 }
 
 pub fn live_runs() -> usize {
@@ -391,15 +499,8 @@ pub fn live_runs() -> usize {
 
 pub fn abort_all() {
     ABORT.store(true, Ordering::SeqCst);
-    #[cfg(unix)]
-    for pid in LIVE.lock().unwrap_or_else(PoisonError::into_inner).iter() {
-        unsafe extern "C" {
-            fn kill(pid: i32, sig: i32) -> i32;
-        }
-        // SAFETY: signals the process group that this run leads; the watch loop reaps it.
-        unsafe {
-            kill(-(*pid as i32), 15);
-        }
+    for (pid, _) in LIVE.lock().unwrap_or_else(PoisonError::into_inner).iter() {
+        crate::pgroup::signal_group(*pid, crate::pgroup::TERM);
     }
 }
 
@@ -410,14 +511,7 @@ pub fn allow_runs() {
 fn kill(child: &mut Child) {
     #[cfg(unix)]
     {
-        unsafe extern "C" {
-            fn kill(pid: i32, sig: i32) -> i32;
-        }
-        let group = -(child.id() as i32);
-        // SAFETY: kill(2) with a negative pid signals the process group this child leads; no memory is shared.
-        unsafe {
-            kill(group, 15);
-        }
+        crate::pgroup::signal_group(child.id(), crate::pgroup::TERM);
         let until = Instant::now() + Duration::from_secs(2);
         while Instant::now() < until {
             if matches!(child.try_wait(), Ok(Some(_))) {
@@ -425,10 +519,7 @@ fn kill(child: &mut Child) {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        // SAFETY: as above; SIGKILL reaches any process of the group that ignored SIGTERM.
-        unsafe {
-            kill(group, 9);
-        }
+        crate::pgroup::signal_group(child.id(), crate::pgroup::KILL);
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -708,27 +799,59 @@ pub fn inside(cwd: &Path, path: &str) -> bool {
     (p.starts_with(cwd) || p.starts_with(&canon)) && !p.components().any(|c| matches!(c, std::path::Component::ParentDir))
 }
 
+const WRAPPERS: [&str; 22] = [
+    "env", "sudo", "su", "doas", "xargs", "eval", "exec", "command", "builtin", "nohup", "nice", "timeout", "time", "watch", "source", ".",
+    "stdbuf", "setsid", "chroot", "flock", "ssh", "busybox",
+];
+const SHELLS: [&str; 8] = ["sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh"];
+const INTERPRETERS: [&str; 10] = ["python", "node", "perl", "ruby", "deno", "bun", "php", "lua", "osascript", "pwsh"];
+
+pub fn grantable_command(command: &str) -> bool {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let Some(first) = words.first() else { return false };
+    let name = first.rsplit('/').next().unwrap_or(first);
+    let inline = |w: &&str| {
+        matches!(*w, "--eval" | "--print" | "--command" | "-p" | "-exec" | "-execdir" | "-ok")
+            || (w.starts_with('-') && !w.starts_with("--") && w[1..].contains(['c', 'e', 'E']))
+    };
+    !command.contains(['\n', '\r', ';', '&', '|', '`', '*', '(', ')', '<', '>'])
+        && !command.contains("$(")
+        && !command.contains(STATE_DIR)
+        && !first.contains('=')
+        && !WRAPPERS.contains(&name)
+        && !SHELLS.contains(&name)
+        && !(INTERPRETERS.iter().any(|i| name.starts_with(i)) && words[1..].iter().any(inline))
+        && !words.iter().any(|w| matches!(*w, "-exec" | "-execdir" | "-ok"))
+}
+
+fn plain_path(p: &str) -> bool {
+    !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || "._-/@+".contains(c)) && !p.contains("..")
+}
+
 pub fn rule_for(cwd: &Path, denial: &Denial) -> Option<String> {
     let s = |k: &str| denial.input[k].as_str().unwrap_or("").trim().to_string();
     let rule = match denial.tool.as_str() {
         "Bash" => {
             let command = s("command");
-            let mut words = command.split_whitespace();
-            let simple = |w: &&str| !w.is_empty() && w.chars().all(|c| c.is_ascii_alphanumeric() || "._-/".contains(c));
-            let first = words.next().filter(simple)?;
-            let prefix = match words.next().filter(simple) {
-                Some(second) => format!("{first} {second}"),
-                None => first.to_string(),
-            };
-            format!("Bash({prefix}:*)")
+            if !grantable_command(&command) {
+                return None;
+            }
+            format!("Bash({command})")
         }
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => {
             let path = if denial.tool == "NotebookEdit" { s("notebook_path") } else { s("file_path") };
-            if path.is_empty() || inside(cwd, &path) { denial.tool.clone() } else { format!("Edit(/{path})") }
+            if !plain_path(&path) || path.split('/').any(|c| c == STATE_DIR) {
+                return None;
+            }
+            if inside(cwd, &path) {
+                format!("Edit(./{})", short_path(cwd, &path).trim_start_matches("./"))
+            } else {
+                format!("Edit(/{path})")
+            }
         }
         "Read" | "Glob" | "Grep" => {
             let path = if denial.tool == "Read" { s("file_path") } else { s("path") };
-            if !path.starts_with('/') {
+            if !path.starts_with('/') || !plain_path(&path) {
                 return None;
             }
             format!("Read(/{path})")
@@ -784,11 +907,39 @@ mod tests {
         assert_eq!(tool_line(cwd, &t("Bash", json!({"command": "npm   test\nsecond"}))), "Bash npm test");
         assert_eq!(tool_line(cwd, &t("TodoWrite", json!({}))), "TodoWrite");
         let d = |tool: &str, input: Value| Denial { tool: tool.into(), input };
-        assert_eq!(rule_for(cwd, &d("Bash", json!({"command": "npm install left-pad"}))).as_deref(), Some("Bash(npm install:*)"));
-        assert_eq!(rule_for(cwd, &d("Bash", json!({"command": "python3 -c \"x\""}))).as_deref(), Some("Bash(python3 -c:*)"));
-        assert_eq!(rule_for(cwd, &d("Bash", json!({"command": "$(evil)"}))), None);
+        let bash = |c: &str| rule_for(cwd, &d("Bash", json!({"command": c})));
+        assert_eq!(bash("npm install left-pad").as_deref(), Some("Bash(npm install left-pad)"));
+        assert_eq!(bash("rm -rf build").as_deref(), Some("Bash(rm -rf build)"));
+        assert_eq!(bash("python3 -m pytest -q").as_deref(), Some("Bash(python3 -m pytest -q)"));
+        for wrapped in [
+            "env FOO=1 curl x",
+            "FOO=1 curl x",
+            "sh -c 'curl x'",
+            "/bin/bash -lc ls",
+            "bash run.sh",
+            "python3 -c \"x\"",
+            "node -e 1",
+            "perl -pe s/a/b/ f",
+            "ruby -e 1",
+            "sudo rm x",
+            "su -",
+            "xargs rm",
+            "eval ls",
+            "curl x | sh",
+            "wget -O- x|bash",
+            "ls && rm x",
+            "echo $(id)",
+            "ls *",
+            "find . -exec rm {} +",
+            "cat .fabric-space/tasks/a.md",
+            "$(evil)",
+        ] {
+            assert_eq!(bash(wrapped), None, "{wrapped}");
+        }
         assert_eq!(rule_for(cwd, &d("Write", json!({"file_path": "/etc/hosts"}))).as_deref(), Some("Edit(//etc/hosts)"));
-        assert_eq!(rule_for(cwd, &d("Write", json!({"file_path": "/work/proj/a.md"}))).as_deref(), Some("Write"));
+        assert_eq!(rule_for(cwd, &d("Write", json!({"file_path": "/work/proj/a.md"}))).as_deref(), Some("Edit(./a.md)"));
+        assert_eq!(rule_for(cwd, &d("Edit", json!({"file_path": "/work/proj/.fabric-space/tasks/t.md"}))), None);
+        assert_eq!(rule_for(cwd, &d("Write", json!({"file_path": "/work/proj/a b*.md"}))), None);
         assert_eq!(
             rule_for(cwd, &d("WebFetch", json!({"url": "https://example.com/x?y"}))).as_deref(),
             Some("WebFetch(domain:example.com)")
@@ -820,9 +971,20 @@ mod tests {
         ] {
             assert!(joined.contains(part), "{part}: {joined}");
         }
-        let exec = args(&e, &call(Role::Executor { read_only: false }, Some("old"), vec!["Read".into(), "Bash(npm test:*)".into()]), "sid");
+        let old = "0b8f6c1e-3a4d-4f5e-9a6b-7c8d9e0f1a2b";
+        let exec = args(&e, &call(Role::Executor { read_only: false }, Some(old), vec!["Read".into(), "Bash(npm test:*)".into()]), "sid");
         let joined = exec.join(" ");
-        assert!(joined.contains("--resume old") && !joined.contains("--session-id"), "{joined}");
+        assert!(joined.contains(&format!("--resume {old}")) && !joined.contains("--session-id"), "{joined}");
+        let i = exec.iter().position(|a| a == "--disallowedTools").unwrap();
+        assert_eq!(
+            exec[i + 1],
+            "Edit(./.fabric-space/**) Edit(.fabric-space/**) Write(./.fabric-space/**) Write(.fabric-space/**) \
+             MultiEdit(./.fabric-space/**) MultiEdit(.fabric-space/**) NotebookEdit(./.fabric-space/**) NotebookEdit(.fabric-space/**)"
+        );
+        assert!(!planner.contains(&"--disallowedTools".to_string()));
+        let forged = args(&e, &call(Role::Executor { read_only: false }, Some("--dangerously-skip-permissions"), vec![]), "sid");
+        assert!(!forged.contains(&"--resume".to_string()) && forged.contains(&"--session-id".to_string()), "{forged:?}");
+        assert!(is_session_id(old) && !is_session_id("../x") && !is_session_id(&old.replace('-', "x")));
         assert!(joined.contains("--permission-mode acceptEdits --permission-prompts none --allowedTools") && !joined.contains("--tools"));
         let i = exec.iter().position(|a| a == "--allowedTools").unwrap();
         assert_eq!(exec[i + 1], "Read Bash(npm test:*)");

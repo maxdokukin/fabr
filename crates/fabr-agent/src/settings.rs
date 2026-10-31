@@ -68,9 +68,17 @@ pub fn execute_timeout_s(space: &Path) -> u64 {
     doc_of(space).map(|d| read_execute_timeout(&d)).unwrap_or(DEFAULT_EXECUTE_TIMEOUT_S)
 }
 
-pub fn max_budget_usd(space: &Path) -> f64 {
+fn usd(space: &Path, key: &str) -> f64 {
     doc_of(space)
-        .and_then(|d| d.get("max_budget_usd").and_then(|v| v.as_float().or_else(|| v.as_integer().map(|n| n as f64))))
+        .and_then(|d| d.get(key).and_then(|v| v.as_float().or_else(|| v.as_integer().map(|n| n as f64))))
         .filter(|v| v.is_finite() && *v > 0.0)
         .unwrap_or(0.0)
+}
+
+pub fn max_budget_usd(space: &Path) -> f64 {
+    usd(space, "max_budget_usd")
+}
+
+pub fn max_task_usd(space: &Path) -> f64 {
+    usd(space, "max_task_usd")
 }

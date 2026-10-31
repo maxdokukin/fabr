@@ -2,7 +2,7 @@ import type {
   Tree, Stamp, Node, NodeRef, RemoveNodeReq, SaveMetaReq, Source, TestResult, Settings, ListDirsReq, DirEntry,
   InitChildrenReq, FabricListReq, FabricListRes, FabricReadRes, FabricWriteReq, FabricWriteRes, FabricStampReq, FabricRemoteListRes, FabricRemoteWriteReq, FabricRemoteCreateReq, FabricCreateReq, FabricCreateRes, ImportTodosReq, ImportTodosRes, HostKey, TrustResult, PasswordState, InstallKeyReq, InstallKeyResult,
   FabricSettings, FabricSettingsRead, FabricSecretsWriteReq, FabricSecretsStatus, FabricCheckReq, FabricCheckResult, FabricAgentStatus, OpenSessionReq,
-  OpenClaudeReq, CcSession, Transcript, KnowledgeKind, NodeKnowledge,
+  OpenClaudeReq, CcSession, Transcript, CcSendReq, CcSendRes, KnowledgeKind, NodeKnowledge,
 } from './types';
 
 export interface Command<A extends unknown[], R> {
@@ -55,6 +55,7 @@ export const COMMANDS = {
   fabricOpenClaude: op<[req: OpenClaudeReq], void>({ req: self }),
   fabricCcSessions: op<[folder: string], CcSession[]>({ req: (folder) => ({ folder }) }),
   fabricCcTranscript: op<[folder: string, id: string, limit?: number], Transcript>({ req: (folder, id, limit = 300) => ({ folder, id, limit }) }),
+  fabricCcSend: op<[req: CcSendReq], CcSendRes>({ req: self }),
   fabricKnowledgeRead: op<[folder: string], NodeKnowledge>({ req: (folder) => ({ folder }) }),
   fabricKnowledgeWrite: op<[folder: string, kind: KnowledgeKind, text: string], NodeKnowledge>({ req: (folder, kind, text) => ({ folder, kind, text }) }),
   fabricLearnedForget: op<[folder: string, id: string], NodeKnowledge>({ req: (folder, id) => ({ folder, id }) }),

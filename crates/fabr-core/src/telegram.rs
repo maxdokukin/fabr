@@ -321,6 +321,9 @@ impl Bot {
                 Ok((false, None))
             }
             _ => {
+                if self.st.follow.take().is_some() {
+                    self.save()?;
+                }
                 if self.commit(&tok.path, &tok.action, &tok.key, None)? {
                     Ok((true, None))
                 } else {
@@ -333,16 +336,20 @@ impl Bot {
 
     fn text(&mut self, m: &Value) -> Result<bool, FabrError> {
         let Some(text) = m["text"].as_str() else { return Ok(false) };
-        let target = match self.st.follow.take() {
-            Some(f) => {
+        let id = m["reply_to_message"]["message_id"].as_i64();
+        let replied = id
+            .and_then(|id| self.st.msgs.iter().find(|x| x.id == id && !x.qid.is_empty()))
+            .map(|x| (x.path.clone(), "answer".to_string(), x.qid.clone()));
+        let target = match (replied, self.st.follow.take()) {
+            (Some(t), follow) => {
+                self.st.follow = follow;
+                Some(t)
+            }
+            (None, Some(f)) => {
                 self.save()?;
                 Some((f.path, f.action, f.key))
             }
-            None => {
-                let id = m["reply_to_message"]["message_id"].as_i64();
-                id.and_then(|id| self.st.msgs.iter().find(|x| x.id == id && !x.qid.is_empty()))
-                    .map(|x| (x.path.clone(), "answer".to_string(), x.qid.clone()))
-            }
+            (None, None) => None,
         };
         let Some((path, action, key)) = target else { return Ok(false) };
         if self.commit(&path, &action, &key, Some(text))? {
@@ -577,6 +584,26 @@ mod tests {
         assert_eq!(bot.poll().unwrap(), 1);
         let a = reload(&p).approval.unwrap();
         assert_eq!((a.status.as_str(), a.note.as_deref(), a.by.as_deref()), ("refused", Some("too pricey"), Some("telegram")));
+    }
+
+    #[test]
+    fn a_reply_to_another_question_wins_over_a_pending_refuse_note() {
+        let f = fake();
+        let (_d, c) = ctx(&f);
+        let (_ta, a, rec_a) = setup(&record("null", "{status: pending, digest: abc}", "defined"));
+        let (_tb, b, rec_b) = setup(&record(open_q(), "null", "task"));
+        let mut bot = Bot::from_ctx(&c).unwrap();
+        bot.sync_record(&a, &rec_a).unwrap();
+        bot.sync_record(&b, &rec_b).unwrap();
+        f.push(tap(1, UID, &f.button(0, "Refuse")));
+        assert_eq!(bot.poll().unwrap(), 0);
+        f.push(say(2, UID, "shop.test", Some(102)));
+        assert_eq!(bot.poll().unwrap(), 1);
+        assert_eq!(reload(&b).question.unwrap().answer.unwrap().value.as_deref(), Some("shop.test"));
+        assert_eq!(reload(&a).approval.unwrap().status, "pending");
+        f.push(say(3, UID, "too pricey", None));
+        assert_eq!(bot.poll().unwrap(), 1);
+        assert_eq!(reload(&a).approval.unwrap().note.as_deref(), Some("too pricey"));
     }
 
     #[test]

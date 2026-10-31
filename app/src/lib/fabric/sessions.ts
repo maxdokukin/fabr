@@ -4,16 +4,20 @@ import type { Sessions } from './types';
 
 const LABELS: [keyof Sessions, string][] = [['plan', 'Planner'], ['execute', 'Executor'], ['evaluate', 'Validator']];
 export const DISCUSS_LABEL = 'Discuss plan in Claude Code';
+export const DISCUSS_HERE_LABEL = 'Discuss here';
 export const DISCUSS_HINT = 'When you are done, press Redo plan and the planner picks up the conversation.';
 const PLAIN = /^[\w./~@%+=:,-]+$/;
 
 export const shellQuote = (s: string): string => (PLAIN.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
 
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const validSessionId = (id: string): boolean => SESSION_ID.test(id);
+
 export function sessionList(s: Sessions): { key: keyof Sessions; label: string; id: string }[] {
-  return LABELS.flatMap(([key, label]) => (s[key] ? [{ key, label, id: s[key] as string }] : []));
+  return LABELS.flatMap(([key, label]) => (s[key] && validSessionId(s[key] as string) ? [{ key, label, id: s[key] as string }] : []));
 }
 
-export const sessionCommand = (folder: string, id: string): string => `cd ${shellQuote(folder)} && claude --resume ${id}`;
+export const sessionCommand = (folder: string, id: string): string => `cd ${shellQuote(folder)} && claude --resume ${shellQuote(id)}`;
 
 export async function copyCommand(folder: string, id: string): Promise<string> {
   const cmd = sessionCommand(folder, id);

@@ -1,4 +1,4 @@
-use crate::ccsession::{self, SessionsReq, TranscriptReq};
+use crate::ccsession::{self, SendReq, SessionsReq, TranscriptReq};
 use crate::dto::{
     Empty, GetTreeReq, HostReq, InitChildrenReq, InstallKeyReq, ListDirsReq, NodeRef, OpenUrlReq, RemoveNodeReq, RevealPathReq,
     SaveMetaReq, SaveSourcesReq, SourceIdReq, SourcePasswordReq, Stamp,
@@ -115,9 +115,17 @@ ops! {
     fabric_open_claude Post false (OpenClaudeReq) |_, r| Ok(Done::Desktop(Desktop::OpenClaude(r)));
     fabric_cc_sessions Post true (SessionsReq) |_, r| json(ccsession::list(&ccsession::config_dir(), &local_dir(&r.folder)?)?);
     fabric_cc_transcript Post true (TranscriptReq) |_, r| json(ccsession::transcript(&ccsession::config_dir(), &local_dir(&r.folder)?, &r.id, r.limit.unwrap_or(300))?);
+    fabric_cc_send Post true (SendReq) |_, r| json(cc_send(&r)?);
     fabric_knowledge_read Post true (KnowledgeReadReq) |_, r| json(knowledge::read(&local_dir(&r.folder)?)?);
     fabric_knowledge_write Post true (KnowledgeWriteReq) |_, r| json(knowledge::write(&local_dir(&r.folder)?, &r.kind, &r.text)?);
     fabric_learned_forget Post true (LearnedForgetReq) |_, r| json(knowledge::forget(&local_dir(&r.folder)?, &r.id)?);
+}
+
+fn cc_send(r: &SendReq) -> Result<ccsession::SendRes, FabrError> {
+    let configured = crate::setup::settings_read(&Ctx::from_env()).map(|s| s.settings.claude_bin).unwrap_or_default();
+    let bin =
+        ccsession::resolve_bin(&configured).ok_or_else(|| FabrError::NotFound("Claude Code was not found; check it in Settings".into()))?;
+    ccsession::send(&bin, &local_dir(&r.folder)?, &r.id, &r.message, std::time::Duration::from_secs(ccsession::SEND_TIMEOUT_S))
 }
 
 fn local_dir(folder: &str) -> Result<std::path::PathBuf, FabrError> {
@@ -130,7 +138,7 @@ fn local_dir(folder: &str) -> Result<std::path::PathBuf, FabrError> {
 
 pub fn claude_command(req: &OpenClaudeReq) -> Result<String, FabrError> {
     local_dir(&req.folder)?;
-    Ok(format!("cd {} && claude", quote_sh(&req.folder)))
+    Ok(format!("cd {} && {}", quote_sh(&req.folder), claude_word()))
 }
 
 pub fn url_allowed(u: &str) -> bool {
@@ -148,7 +156,15 @@ pub fn session_command(req: &OpenSessionReq) -> Result<String, FabrError> {
         return Err(FabrError::BadRequest("that is not a session id".into()));
     }
     local_dir(&req.folder)?;
-    Ok(format!("cd {} && claude --resume {id}", quote_sh(&req.folder)))
+    Ok(format!("cd {} && {} --resume {id}", quote_sh(&req.folder), claude_word()))
+}
+
+fn claude_word() -> String {
+    let configured = crate::setup::settings_read(&Ctx::from_env()).map(|s| s.settings.claude_bin).unwrap_or_default();
+    match configured.trim() {
+        "" | "claude" => "claude".to_string(),
+        _ => ccsession::resolve_bin(&configured).map_or_else(|| "claude".to_string(), |p| quote_sh(&p.to_string_lossy())),
+    }
 }
 
 #[cfg(test)]

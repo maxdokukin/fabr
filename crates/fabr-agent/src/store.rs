@@ -41,7 +41,9 @@ pub fn merge(disk: &mut TaskRecord, base: &TaskRecord, mine: &TaskRecord) {
     take(&mut disk.assertions, &base.assertions, &mine.assertions);
     take(&mut disk.approval, &base.approval, &mine.approval);
     take(&mut disk.verdict, &base.verdict, &mine.verdict);
-    take(&mut disk.cost_usd, &base.cost_usd, &mine.cost_usd);
+    if mine.cost_usd != base.cost_usd {
+        disk.cost_usd = ((disk.cost_usd + mine.cost_usd - base.cost_usd).max(0.0) * 1e6).round() / 1e6;
+    }
     take(&mut disk.links, &base.links, &mine.links);
     take(&mut disk.sessions, &base.sessions, &mine.sessions);
     take_section(&mut disk.context, &mut disk.by.context, (&base.context, base.by.context), (&mine.context, mine.by.context));
@@ -116,5 +118,20 @@ mod tests {
         cleared.by.plan = None;
         merge(&mut disk, &known, &cleared);
         assert_eq!((disk.plan.as_str(), disk.by.plan), ("", None));
+    }
+
+    #[test]
+    fn cost_is_added_to_what_a_chat_wrote_meanwhile() {
+        let mut base = crate::link::test_reminder("t");
+        base.cost_usd = 0.5;
+        let mut disk = base.clone();
+        disk.cost_usd = 0.75;
+        let mut mine = base.clone();
+        mine.cost_usd = 0.6;
+        merge(&mut disk, &base, &mine);
+        assert_eq!(disk.cost_usd, 0.85);
+        let mut same = disk.clone();
+        merge(&mut same, &base, &base);
+        assert_eq!(same.cost_usd, 0.85);
     }
 }

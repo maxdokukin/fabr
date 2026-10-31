@@ -1,85 +1,66 @@
 # Fabr
 
-Fabr turns the todos next to your files into tasks that an agent defines, plans, runs and checks. It is for people who already organise their work in folders.
+Fabr turns the reminders next to your files into tasks that Claude Code plans, runs and checks in that folder. It is for people who already use Claude Code and organise their work in folders.
 
 ## Problem
 
-Your todos live in one app and the files they are about live in another. Handing a task to an AI agent means retyping the context, because the agent cannot see your folder. Once it runs you cannot tell which step it is on, and the only way to stop it is to kill it.
+Your reminders live in one app, and your Claude Code sessions live in a terminal history. To hand a reminder to Claude Code, you open a terminal in the folder and retype the context. A week later you cannot tell which session did which task, or whether anyone checked the result.
 
 ## Solution
 
-Fabr keeps every task as a Markdown file inside the folder it belongs to, and shows those folders as a tree. You type a title and press Enter to add a todo. Press Delegate and a fixed pipeline takes it from a one-line reminder to a checked result. It gathers the folder's context, defines the task and asks you what is missing. Then it plans, waits for your approval, executes, and evaluates the result against the assertions you approved. Three ideas hold it together.
+Fabr keeps every task as a Markdown file inside the folder it belongs to, and shows those folders as a tree. Press Delegate and fabr starts Claude Code in that folder three times. A planner session writes a plan with inputs, outputs and steps, and you approve it. An executor session carries it out. A validator session checks the result against the assertions you approved. Three ideas hold it together.
 
 1. The file tree is the spine. Tasks, rules and knowledge are keyed by folder path, and a folder inherits from the folders above it.
-2. The outer loop is code and the model works inside one step at a time, so every gate can be tested and replayed.
-3. You keep the wheel. You can pause, suspend, complete or cancel a task at any time, and edit any section of it until execution starts.
+2. Every task records its Claude Code session ids, so you can resume the planner, executor or validator in a terminal at any time.
+3. You keep the wheel. The executor may edit only inside the task's folder with the tools you approved, and anything else comes back to you as a question.
 
 ## See it
 
-```sh
-fabr add ~/notes "write the release notes" --due 2026-11-01
-head -8 ~/notes/.fabric-space/tasks/2026-10-25-write-the-release-notes.md
-```
+After a run, the task file holds the plan, the verdict and the three sessions:
 
 ```
----
-schema: 6
-id: 2026-10-25-write-the-release-notes
-source: null
-title: write the release notes
-due: 2026-11-01
-pri: 0
-state: reminder
+sessions:
+  plan: 0c15bc0c-4af9-4ba7-b36c-2a466a6ca85f
+  execute: 087a2a84-8881-4c81-82f5-0ff7d74a11a9
+  evaluate: 1ea0d2e5-52be-4d83-90d1-7daff22ce8f1
+## Log
+- 06:52:26Z execute: started
+- 06:52:31Z execute: Read meeting-2026-10-29.md
+- 06:52:34Z execute: Write action-items.md
+- 06:52:45Z evaluate: verdict pass
 ```
 
-## Why not a todo app or a coding agent
+## Why not Claude Code alone
 
-| | A todo app | A coding agent in a terminal | Fabr |
-|---|---|---|---|
-| Where the task lives | its own database | the chat scroll | a Markdown file in your folder |
-| Who can read it later | you | nobody | you, the agent, and `git diff` |
-| Stopping a run | not applicable | Ctrl-C | pause, suspend, complete or cancel in one click |
-| What the agent may touch | nothing | anything on the machine | the task's folder, with 4 tools |
+| | Claude Code in a terminal | Fabr |
+|---|---|---|
+| Where the task lives | the chat history | a Markdown file in your folder |
+| What gets approved | each tool call, one prompt at a time | one plan, its tools and its checks |
+| Who checks the result | you | a separate validator session, then you |
 
 ## Install
 
-Download the macOS build from https://github.com/maxdokukin/fabr/releases, open the `.dmg` and drag Fabr to Applications. The build is unsigned, so clear the quarantine flag once:
+Install Claude Code from https://claude.com/claude-code and sign in once by running `claude`. Then download the macOS build from https://github.com/maxdokukin/fabr/releases, open the `.dmg` and drag Fabr to Applications. The build is unsigned, so clear the quarantine flag once:
 
 ```sh
 xattr -d com.apple.quarantine /Applications/Fabr.app
 ```
 
-Open Fabr. A 6-screen setup asks for a default folder, an Anthropic API key and a model. The agent runs in the background while the app is open.
+Open Fabr. Setup asks for a default folder and checks that Claude Code is installed and signed in.
 
 ## Usage
 
-Add a todo in the folder it belongs to: type a title on the node, press Enter and fill the sheet. Save writes a reminder.
+Add a reminder: type a title on a folder in the tree, press Enter and fill the sheet.
 
-Delegate it: press Generate with AI in the sheet. The node shows a stage bar as the agent moves through the 9 steps, and the Agents badge in the toolbar lists every running agent.
+Delegate it: press Generate with AI. Answer the planner's question if it asks one, then read the plan and approve it. The node's stage bar follows the task to the verdict.
 
-Follow folders on another machine: add an ssh source in Settings. You open, run and edit the tasks on that machine from your Mac over the ssh connection you already have.
+Open a session: in the task sheet, press Open in terminal next to the planner, executor or validator. Press Transcript to read the session in the app instead. Node settings list every Claude Code session in that folder, plus its rules and knowledge.
+
+Work from a terminal: `fabr status` lists every task and what it waits for, and `fabr approve <task>` approves a plan.
 
 ## Status
 
-The pipeline runs end to end today. Define, plan and approval work, with an auto mode that skips the tap. The tool loop has 4 tools that stay inside the task's folder: read any file, list, write Markdown, make a folder. The evaluator is a model with a fresh context that judges each assertion from the evidence. Pause, suspend, complete, cancel, redo and per-section edits work, and ssh sources are read and written.
-
-## Sponsors
-
-Sponsor tools are optional. They appear when `~/.fabric-space/secrets.toml` parses and contains that provider's key. An approval with an empty `bound_actions` list still runs the local read, list, Markdown write, and make-directory tools. It does not authorize a sponsor tool. A remote call needs its own grant. The record sheet shows each bound action's tool, destination, effect, and grant. A log line that says `UNKNOWN` is a failure waiting for reconciliation.
-
-What ran on `unified-integration` on 2026-10-25:
-
-- Task A confirmed `Stay under $100 for internship supplies` into the local preference file.
-- Task B recalled that line, searched once with Bright Data after approval (`hits=8`), and wrote `desk.md`. The prices in that file are estimates. The search did not return prices. Nothing was purchased.
-- Bright Data's docs test wrote `research.md` with `source: bright_data` and `https://docs.rs/ureq` only after approval.
-- Moss listed 3 indexes and retrieved 75 documents from `agent-memory-context`. `moss_upload` does not run.
-- Cartesia wrote `speech.wav` (`bytes=22050`) and transcribed it (`chars=5`). The record sheet can record or pick `capture.wav` and plays `speech.wav` only after an approved speak run succeeds.
-- Apify ran `apify~hello-world` and returned one dataset item.
-- Nessie read sandbox accounts (`accounts=0`), labeled sandbox.
-
-Fo discovered five private account tools and called none. Visa, Figma, Microsoft, and Atlassian Forge are not integrated. Anthropic is the model client. Track eligibility is unverified. Details: [docs/SPONSOR_TRACKS.md](docs/SPONSOR_TRACKS.md), [docs/DEMO.md](docs/DEMO.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/TEST_RESULTS.md](docs/TEST_RESULTS.md), [docs/sponsor-evidence.md](docs/sponsor-evidence.md).
-
-Next, execution moves to an isolated sandbox that runs a coding harness with a fixed tool set. Learning from answers, Telegram and the personal data bank are designed and not built.
+Planning, approval, execution and validation run through Claude Code today, with a spend cap and a time limit per run. Pause, cancel and redo work. Answers you give are saved as learned notes for the next task in that folder. Telegram questions, approvals and notices are built and tested against a mock only. The personal data bank and form filling are designed and not built.
 
 ---
 
@@ -87,15 +68,16 @@ Next, execution moves to an isolated sandbox that runs a coding harness with a f
 
 ```sh
 cargo test --workspace
-cd app && npm install && npm test
+cd app && npm install && npx vitest run
 cargo run -p fabr -- serve        # web UI on loopback
+cargo run -p fabr -- agent        # the runner, without the desktop app
 cd app && npm run tauri build     # macOS bundles
 ```
 
 ## Layout
 
-`crates/fabr-core` holds the tree, the format of a task record and the ssh backend. `crates/fabr-agent` is the pipeline runner. `crates/fabr` is the command line and the loopback server. `app` is the Svelte and Tauri desktop app. `fixtures` holds one record per state, see [fixtures/README.md](fixtures/README.md). `sample-fabr-space` is the demo dataset, see [sample-fabr-space/README.md](sample-fabr-space/README.md).
+`crates/fabr-core` holds the tree, the task record format, setup, Telegram and the ssh backend. `crates/fabr-agent` is the pipeline runner and the Claude Code engine, see [crates/fabr-agent/README.md](crates/fabr-agent/README.md). `crates/fabr` is the command line and the loopback server. `app` is the Svelte and Tauri desktop app. `fixtures` holds one record per state, see [fixtures/README.md](fixtures/README.md). `sample-fabr-space` is the demo dataset, see [sample-fabr-space/README.md](sample-fabr-space/README.md).
 
 ## License
 
-MIT, see [LICENSE.txt](LICENSE.txt).
+GPL-3.0-only, see [LICENSE.txt](LICENSE.txt).
