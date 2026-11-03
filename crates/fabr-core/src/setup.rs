@@ -7,10 +7,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use toml_edit::{Array, DocumentMut, Item, Table, value};
 
-pub const MODELS: [&str; 2] = ["claude-sonnet-5-5", "claude-haiku-5-5"];
 pub const DEFAULT_PROVIDER: &str = "local";
 pub const DEFAULT_LOCAL_BASE_URL: &str = "http://localhost:11434/v1";
-const ANTHROPIC_URL: &str = "https://api.anthropic.com";
 const TELEGRAM_URL: &str = "https://api.telegram.org";
 const NO_MESSAGE: &str = "No message arrived in time. Open your bot in Telegram and send it any text.";
 const NO_CONFIRM: &str = "Confirm was not tapped in time. Tap Confirm under the message from your bot.";
@@ -18,14 +16,13 @@ const NO_CONFIRM: &str = "Confirm was not tapped in time. Tap Confirm under the 
 #[derive(Debug, Clone)]
 pub struct Ctx {
     pub home: PathBuf,
-    pub anthropic_url: String,
     pub telegram_url: String,
     pub poll_s: u64,
 }
 
 impl Ctx {
     pub fn new(home: impl Into<PathBuf>) -> Ctx {
-        Ctx { home: home.into(), anthropic_url: ANTHROPIC_URL.into(), telegram_url: TELEGRAM_URL.into(), poll_s: 10 }
+        Ctx { home: home.into(), telegram_url: TELEGRAM_URL.into(), poll_s: 10 }
     }
 
     pub fn from_env() -> Ctx {
@@ -35,9 +32,6 @@ impl Ctx {
             .or_else(|| directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf()))
             .unwrap_or_else(|| PathBuf::from("."));
         let mut c = Ctx::new(home);
-        if let Some(u) = env("FABR_ANTHROPIC_URL") {
-            c.anthropic_url = u;
-        }
         if let Some(u) = env("FABR_TELEGRAM_URL") {
             c.telegram_url = u;
         }
@@ -126,7 +120,7 @@ impl FabricSettings {
     pub fn defaults(home: &Path) -> FabricSettings {
         FabricSettings {
             default_folder: home.to_string_lossy().into_owned(),
-            model: MODELS[0].into(),
+            model: "qwen2.5".into(),
             provider: DEFAULT_PROVIDER.into(),
             local_base_url: DEFAULT_LOCAL_BASE_URL.into(),
             telegram_user_id: None,
@@ -256,15 +250,8 @@ pub fn settings_read(ctx: &Ctx) -> Result<SettingsRead, FabrError> {
 
 pub fn settings_write(ctx: &Ctx, req: SettingsWriteReq) -> Result<SettingsRead, FabrError> {
     let s = req.settings;
-    let local = s.provider == "local";
-    // Cloud (Anthropic) is limited to the known models; a local provider accepts
-    // any non-empty model name the user has pulled (e.g. "qwen2.5").
-    if local {
-        if s.model.trim().is_empty() {
-            return Err(FabrError::BadRequest("model is required".into()));
-        }
-    } else if !MODELS.contains(&s.model.as_str()) {
-        return Err(FabrError::BadRequest(format!("model must be one of {}", MODELS.join(", "))));
+    if s.model.trim().is_empty() {
+        return Err(FabrError::BadRequest("model is required".into()));
     }
     let path = ctx.settings_path();
     let mut doc = load_doc(&path)?.unwrap_or_default();
@@ -318,7 +305,7 @@ pub fn secrets_write(ctx: &Ctx, req: SecretsWriteReq) -> Result<SecretsStatus, F
 }
 
 pub fn secrets_status(ctx: &Ctx) -> SecretsStatus {
-    let key = read_secret(ctx, "anthropic_api_key");
+    let key = read_secret(ctx, "api_key").or_else(|| read_secret(ctx, "anthropic_api_key"));
     let token = read_secret(ctx, "telegram_bot_token");
     SecretsStatus {
         anthropic_api_key: key.is_some(),
@@ -356,16 +343,6 @@ fn agent(secs: u64) -> ureq::Agent {
     ureq::AgentBuilder::new().timeout(Duration::from_secs(secs)).build()
 }
 
-fn message_call(ctx: &Ctx, key: &str, model: &str, prompt: &str) -> Reply {
-    let req = agent(30)
-        .post(&format!("{}/v1/messages", ctx.anthropic_url.trim_end_matches('/')))
-        .set("x-api-key", key)
-        .set("anthropic-version", "2023-06-01");
-    let body = json!({ "model": model, "max_tokens": 16, "messages": [{ "role": "user", "content": prompt }] });
-    send(req, Some(&body))
-}
-
-const ANTHROPIC_DOWN: &str = "Could not reach Anthropic. Check the internet connection and try again.";
 const TELEGRAM_DOWN: &str = "Could not reach Telegram. Check the internet connection and try again.";
 
 pub fn check_folder(ctx: &Ctx, path: &str) -> Value {
@@ -387,28 +364,27 @@ pub fn check_folder(ctx: &Ctx, path: &str) -> Value {
 }
 
 pub fn check_api_key(ctx: &Ctx) -> Value {
-    let Some(key) = read_secret(ctx, "anthropic_api_key") else { return fail("No API key is saved yet. Enter it first.") };
-    match message_call(ctx, &key, MODELS[0], "Say ok.") {
-        Reply::Json(200, _) => json!({ "ok": true }),
-        Reply::Json(401, _) => fail("The API key was not accepted"),
-        Reply::Json(c, _) => fail(&format!("Anthropic answered with HTTP {c}. Try again in a moment.")),
-        Reply::Down => fail(ANTHROPIC_DOWN),
+    let key = read_secret(ctx, "api_key").or_else(|| read_secret(ctx, "anthropic_api_key"));
+    if key.is_none() {
+        return fail("No API key is saved yet. Enter it first.");
     }
+    json!({ "ok": true })
 }
 
-pub fn check_model(ctx: &Ctx, model: &str) -> Value {
-    if !MODELS.contains(&model) {
-        return fail(&format!("Model must be one of {}.", MODELS.join(" or ")));
+pub fn check_model(_ctx: &Ctx, model: &str) -> Value {
+    if model.trim().is_empty() {
+        return fail("Model name cannot be empty.");
     }
-    let Some(key) = read_secret(ctx, "anthropic_api_key") else { return fail("No API key is saved yet. Enter it first.") };
-    match message_call(ctx, &key, model, "Reply with one short line saying hello.") {
-        Reply::Json(200, v) => {
-            let text = v["content"].as_array().and_then(|a| a.iter().find_map(|b| b["text"].as_str())).unwrap_or("").trim().to_string();
-            json!({ "ok": true, "reply": text })
-        }
-        Reply::Json(401, _) => fail("The API key was not accepted"),
-        Reply::Json(c, _) => fail(&format!("Anthropic did not accept that model (HTTP {c}).")),
-        Reply::Down => fail(ANTHROPIC_DOWN),
+    json!({ "ok": true, "reply": format!("Model {model} configured.") })
+}
+
+pub fn check_connection(base_url: &str) -> Value {
+    let trimmed = base_url.trim_end_matches('/');
+    let url = if trimmed.ends_with("/v1") { format!("{trimmed}/models") } else { format!("{trimmed}/v1/models") };
+    match send(agent(5).get(&url), None) {
+        Reply::Json(200, _) => json!({ "ok": true }),
+        Reply::Json(c, _) => fail(&format!("Server responded with HTTP {c}")),
+        Reply::Down => fail(&format!("Could not connect to {base_url}")),
     }
 }
 
@@ -490,6 +466,7 @@ pub fn check(ctx: &Ctx, req: CheckReq) -> Result<Value, FabrError> {
         "folder" => check_folder(ctx, &need(&req.path, "path")?),
         "api_key" => check_api_key(ctx),
         "model" => check_model(ctx, &need(&req.model, "model")?),
+        "connection" => check_connection(req.path.as_deref().unwrap_or(DEFAULT_LOCAL_BASE_URL)),
         "telegram_token" => check_telegram_token(ctx),
         k => return Err(FabrError::BadRequest(format!("unknown check {k:?}"))),
     })
@@ -561,7 +538,6 @@ mod tests {
     fn ctx(f: &Fake) -> (tempfile::TempDir, Ctx) {
         let d = tempfile::tempdir().unwrap();
         let mut c = Ctx::new(d.path());
-        c.anthropic_url = f.url.clone();
         c.telegram_url = f.url.clone();
         c.poll_s = 0;
         secrets_write(
@@ -588,7 +564,7 @@ mod tests {
         let c = Ctx::new(d.path());
         let r = settings_read(&c).unwrap();
         assert!(!r.exists);
-        assert_eq!(r.settings.model, "claude-sonnet-5-5");
+        assert_eq!(r.settings.model, "qwen2.5");
         assert_eq!(r.settings.question_budget, 5);
         std::fs::create_dir_all(c.space()).unwrap();
         std::fs::write(c.settings_path(), "future_key = \"x\"\n[setup]\nextra = 1\n").unwrap();
@@ -596,7 +572,7 @@ mod tests {
         s.telegram_user_id = Some(42);
         s.setup.completed_steps = vec!["folder".into(), "api_key".into()];
         s.setup.completed = true;
-        s.model = "claude-haiku-5-5".into();
+        s.model = "llama3".into();
         let w = settings_write(&c, SettingsWriteReq { settings: s.clone() }).unwrap();
         assert!(w.exists);
         assert_eq!(w.settings, s);
@@ -606,10 +582,8 @@ mod tests {
         settings_write(&c, SettingsWriteReq { settings: s }).unwrap();
         assert_eq!(settings_read(&c).unwrap().settings.telegram_user_id, None);
         let mut bad = settings_read(&c).unwrap().settings;
-        bad.provider = "anthropic".into();
-        bad.model = "gpt".into();
+        bad.model = "   ".into();
         assert!(settings_write(&c, SettingsWriteReq { settings: bad }).is_err());
-        // A local provider accepts any non-empty model name.
         let mut local = settings_read(&c).unwrap().settings;
         local.provider = "local".into();
         local.model = "qwen2.5".into();
@@ -673,24 +647,12 @@ mod tests {
         let f = fake(200, vec![]);
         let (_d, c) = ctx(&f);
         assert_eq!(check_api_key(&c), json!({ "ok": true }));
-        assert_eq!(check_model(&c, "claude-haiku-5-5"), json!({ "ok": true, "reply": "Hello there." }));
-        assert_eq!(check_model(&c, "gpt-4")["ok"], false);
-        let log = f.log.lock().unwrap();
-        assert_eq!(log.len(), 2);
-        assert_eq!(log[0].1["key"], "sk-ant-FIXTURE-NOT-REAL");
-        assert_eq!(log[0].1["body"]["model"], "claude-sonnet-5-5");
-        assert_eq!(log[0].1["body"]["max_tokens"], 16);
-        assert_eq!(log[1].1["body"]["model"], "claude-haiku-5-5");
+        assert_eq!(check_model(&c, "qwen2.5"), json!({ "ok": true, "reply": "Model qwen2.5 configured." }));
+        assert_eq!(check_model(&c, "   ")["ok"], false);
 
-        let f = fake(401, vec![]);
-        let (_d, c) = ctx(&f);
-        assert_eq!(check_api_key(&c), json!({ "ok": false, "reason": "The API key was not accepted" }));
-
-        let mut c2 = c.clone();
-        c2.anthropic_url = "http://127.0.0.1:1".into();
-        let r = check_api_key(&c2);
-        assert_eq!(r["ok"], false);
-        assert!(!r.to_string().contains("FIXTURE"));
+        let d_empty = tempfile::tempdir().unwrap();
+        let c_empty = Ctx::new(d_empty.path());
+        assert_eq!(check_api_key(&c_empty)["ok"], false);
     }
 
     #[test]

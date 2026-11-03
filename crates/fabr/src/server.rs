@@ -156,6 +156,117 @@ fn query_object(query: &str) -> serde_json::Value {
     serde_json::Value::Object(m)
 }
 
+fn handle_lantern(path: &str, req: &mut Request) -> Option<Resp> {
+    if path == "/lantern/graph" {
+        if req.method() != &Method::Post {
+            return Some(error(405, "method not allowed"));
+        }
+        #[derive(serde::Deserialize)]
+        struct GraphReq {
+            task_id: String,
+            run_id: Option<String>,
+            folder: Option<PathBuf>,
+        }
+        let body: GraphReq = match read_body(req) {
+            Ok(b) => b,
+            Err(r) => return Some(r),
+        };
+        let space_dir = crate::lantern_cli::resolve_space_dir(body.folder);
+        let run_id = match crate::lantern_cli::resolve_run_id(&space_dir, &body.task_id, body.run_id) {
+            Ok(r) => r,
+            Err(e) => return Some(api_error("lantern_graph", e)),
+        };
+        let run_log = match fabr_agent::lantern::RunLog::new(&space_dir, &body.task_id, &run_id) {
+            Ok(l) => l,
+            Err(e) => return Some(api_error("lantern_graph", e)),
+        };
+        let events = match run_log.read_all() {
+            Ok(ev) => ev,
+            Err(e) => return Some(api_error("lantern_graph", e)),
+        };
+        let graph = fabr_agent::lantern::LanternGraph::from_events(&events);
+        return Some(json(200, &graph));
+    }
+
+    if let Some(rest) = path.strip_prefix("/lantern/")
+        && let Some(task_id) = rest.strip_suffix("/graph")
+    {
+        if req.method() != &Method::Get {
+            return Some(error(405, "method not allowed"));
+        }
+        let space_dir = crate::lantern_cli::resolve_space_dir(None);
+        let run_id = match crate::lantern_cli::resolve_run_id(&space_dir, task_id, None) {
+            Ok(r) => r,
+            Err(e) => return Some(api_error("lantern_graph", e)),
+        };
+        let run_log = match fabr_agent::lantern::RunLog::new(&space_dir, task_id, &run_id) {
+            Ok(l) => l,
+            Err(e) => return Some(api_error("lantern_graph", e)),
+        };
+        let events = match run_log.read_all() {
+            Ok(ev) => ev,
+            Err(e) => return Some(api_error("lantern_graph", e)),
+        };
+        let graph = fabr_agent::lantern::LanternGraph::from_events(&events);
+        return Some(json(200, &graph));
+    }
+
+    if path == "/lantern/steer" {
+        if req.method() != &Method::Post {
+            return Some(error(405, "method not allowed"));
+        }
+        #[derive(serde::Deserialize)]
+        struct SteerReq {
+            task_id: String,
+            run_id: Option<String>,
+            folder: Option<PathBuf>,
+            action: fabr_agent::lantern::SteeringAction,
+            by: Option<String>,
+        }
+        let body: SteerReq = match read_body(req) {
+            Ok(b) => b,
+            Err(r) => return Some(r),
+        };
+        let space_dir = crate::lantern_cli::resolve_space_dir(body.folder);
+        let run_id = match crate::lantern_cli::resolve_run_id(&space_dir, &body.task_id, body.run_id) {
+            Ok(r) => r,
+            Err(e) => return Some(api_error("lantern_steer", e)),
+        };
+        let run_log = match fabr_agent::lantern::RunLog::new(&space_dir, &body.task_id, &run_id) {
+            Ok(l) => l,
+            Err(e) => return Some(api_error("lantern_steer", e)),
+        };
+        let events = match run_log.read_all() {
+            Ok(ev) => ev,
+            Err(e) => return Some(api_error("lantern_steer", e)),
+        };
+        let mut graph = fabr_agent::lantern::LanternGraph::from_events(&events);
+        let effects_log = fabr_agent::lantern::EffectsLog::new(run_log.dir());
+
+        let mut state = if let Ok(Some(cp)) = fabr_agent::lantern::Checkpoint::load_latest(run_log.dir()) {
+            cp.exploration_state
+        } else {
+            fabr_agent::lantern::ExplorationState::new(fabr_agent::lantern::ExplorationBudget::default())
+        };
+
+        let report = match fabr_agent::lantern::apply_steering(
+            &mut state,
+            &mut graph,
+            &run_log,
+            &effects_log,
+            &body.task_id,
+            body.action,
+            body.by.as_deref().unwrap_or("user"),
+        ) {
+            Ok(rep) => rep,
+            Err(e) => return Some(api_error("lantern_steer", e)),
+        };
+        return Some(json(200, &report));
+    }
+
+    None
+}
+
 pub fn route(ws: &Workspace, ui: &Ui, req: &mut Request) -> Resp {
     let Some(host) = get_header(req, "Host").map(str::to_string) else {
         return error(403, "missing Host header");
@@ -170,6 +281,9 @@ pub fn route(ws: &Workspace, ui: &Ui, req: &mut Request) -> Resp {
     }
     let url = req.url().to_string();
     let (path, query) = url.split_once('?').unwrap_or((&url, ""));
+    if let Some(resp) = handle_lantern(path, req) {
+        return resp;
+    }
     let Some(name) = path.strip_prefix("/api/") else {
         return match req.method() {
             Method::Get | Method::Head => serve_static(ui, path),

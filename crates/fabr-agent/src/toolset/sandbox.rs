@@ -56,6 +56,7 @@ impl Sandbox {
     /// is not an ancestor of the node, the read scope silently stays at the node.
     pub fn with_read_root(node_dir: &Path, read_root: &Path) -> Result<Sandbox, String> {
         let mut sb = Sandbox::new(node_dir)?;
+        #[allow(clippy::collapsible_if)]
         if let Ok(canon) = read_root.canonicalize() {
             if sb.root.starts_with(&canon) {
                 sb.read_root = Some(canon);

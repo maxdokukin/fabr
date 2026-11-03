@@ -74,7 +74,7 @@ impl Fake {
                         "plan_meta": {"reversibility": "reversible", "tools": ["write_file"], "checks": [{"cmd": "test", "args": ["-f", "greet.txt"]}]}})
                 };
                 let text =
-                    json!({"content": [{"type": "text", "text": inner.to_string()}], "usage": {"input_tokens": 10, "output_tokens": 5}})
+                    json!({"choices": [{"message": {"role": "assistant", "content": inner.to_string()}}], "usage": {"prompt_tokens": 10, "completion_tokens": 5}})
                         .to_string();
                 let resp = tiny_http::Response::from_string(text)
                     .with_status_code(200u16)
@@ -143,15 +143,14 @@ fn escape_env(url: &str) -> Env {
     std::fs::write(
         space.join("settings.toml"),
         format!(
-            "default_folder = \"{}\"\nmodel = \"claude-sonnet-5-5\"\nheartbeat_interval_s = 10\n\n[setup]\ncompleted_steps = [\"folder\", \"api_key\", \"model\"]\ncompleted = true\n",
+            "default_folder = \"{}\"\nmodel = \"claude-sonnet-5-5\"\nlocal_base_url = \"{url}\"\nheartbeat_interval_s = 10\n\n[setup]\ncompleted_steps = [\"folder\", \"api_key\", \"model\"]\ncompleted = true\n",
             root.display()
         ),
     )
     .unwrap();
     std::fs::write(space.join("secrets.toml"), format!("anthropic_api_key = \"{KEY}\"\n")).unwrap();
 
-    let mut ctx = Ctx::new(&home);
-    ctx.anthropic_url = url.to_string();
+    let ctx = Ctx::new(&home);
     Env { _tmp: tmp, ctx, root, inside, outside }
 }
 

@@ -1,3 +1,4 @@
+mod lantern_cli;
 mod server;
 
 use clap::{Parser, Subcommand};
@@ -90,6 +91,25 @@ enum Cmd {
         #[arg(long)]
         wip: bool,
         path: Option<PathBuf>,
+    },
+    #[command(about = "Display the Lantern decision graph and timeline")]
+    Lantern {
+        task_id: String,
+        run_id: Option<String>,
+        #[arg(long, help = "Path to the root folder or fabric space")]
+        folder: Option<PathBuf>,
+        #[arg(long, help = "Output as raw JSON instead of ASCII art")]
+        json: bool,
+    },
+    #[command(about = "Apply human steering to a Lantern task run")]
+    Steer {
+        task_id: String,
+        #[command(subcommand)]
+        action: lantern_cli::SteerCmd,
+        #[arg(long, help = "Path to the root folder or fabric space")]
+        folder: Option<PathBuf>,
+        #[arg(long)]
+        run_id: Option<String>,
     },
 }
 
@@ -366,6 +386,8 @@ fn main() -> ExitCode {
         Cmd::Add { path, title, due, pri } => cmd_add(path, title, due, pri),
         Cmd::Import { path } => cmd_import(path),
         Cmd::Ls { all, overdue, wip, path } => cmd_ls(path, all, overdue, wip),
+        Cmd::Lantern { task_id, run_id, folder, json } => lantern_cli::cmd_lantern(task_id, run_id, folder, json),
+        Cmd::Steer { task_id, action, folder, run_id } => lantern_cli::cmd_steer(task_id, action, folder, run_id),
         Cmd::Check { .. } | Cmd::Telegram { .. } | Cmd::Agent { .. } => unreachable!(),
     };
     match r {

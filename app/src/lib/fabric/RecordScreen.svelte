@@ -17,6 +17,7 @@
   import { suspendLabel } from './stage';
   import SpeechCapture from './SpeechCapture.svelte';
   import StateRibbon from './StateRibbon.svelte';
+  import LanternViewer from './LanternViewer.svelte';
   import { minuteOf } from '../model';
   import type { TaskRecord } from './types';
 
@@ -321,6 +322,10 @@
           </ul>
         {:else}<p class="slot">Log: written by the backend as each step runs</p>{/if}
       </div>
+    </Group>
+
+    <Group header="Lantern Decision Provenance">
+      <LanternViewer taskId={record.id} />
     </Group>
 
     <Group header="Verdict">

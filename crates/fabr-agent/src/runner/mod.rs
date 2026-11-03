@@ -11,7 +11,7 @@ pub use signal::install as install_signals;
 
 use crate::board::{Activity, Board, Extras};
 use crate::lifecycle::{Ctl, advance_with, apply_redo, task_path_key, trailing_error};
-use crate::model::{AnthropicModel, CallObserver};
+use crate::model::{CallObserver, OpenAiCompatModel};
 use crate::now_utc;
 use crate::settings::check_timeout_s;
 use crate::state::{
@@ -63,14 +63,9 @@ pub fn start_gate(ctx: &Ctx) -> Result<Gate, FabrError> {
     // `settings_read` does not carry them. They default to anthropic / the
     // standard Ollama endpoint when absent.
     let (provider, local_base_url) = read_provider(&ctx.settings_path());
-    let local = provider == "local";
-    // The Anthropic key is only required when the Anthropic provider is in use.
-    // A local-only setup (Ollama / MLX) runs with no key at all.
-    let key = match read_secret(ctx, "anthropic_api_key") {
-        Some(key) => key,
-        None if local => String::new(),
-        None => return refuse("No Anthropic API key is saved, so enter it in the app's setup first."),
-    };
+    // An API key is optional for local servers (Ollama, LM Studio, etc.)
+    // but passed through when configured for authenticated endpoints.
+    let key = read_secret(ctx, "api_key").or_else(|| read_secret(ctx, "anthropic_api_key")).unwrap_or_default();
     if read.settings.model.trim().is_empty() {
         return refuse("No model is selected, so pick one in the app's setup first.");
     }
@@ -117,33 +112,22 @@ fn read_provider(settings_path: &Path) -> (String, String) {
 /// The resolved backend selection, kept so the model can be rebuilt when a
 /// retry base is supplied after construction (see [`Runner::with_model_retry_base`]).
 struct ModelSpec {
-    provider: String,
-    anthropic_url: String,
-    local_base_url: String,
+    base_url: String,
     key: Secret,
     model: String,
 }
 
 impl ModelSpec {
-    /// Build the backend the resolved provider selects. For `local`, the key is
-    /// attached only when present (Ollama needs none; LM Studio ignores it).
+    /// Build the universal OpenAI-compatible backend. Key is attached when present.
     fn build(&self, observer: CallObserver, retry_base: Option<Duration>) -> Box<dyn crate::model::Model + Send + Sync> {
-        if self.provider == "local" {
-            let mut m = crate::model::LocalModel::new(self.local_base_url.clone(), self.model.clone()).with_observer(observer);
-            if !self.key.is_empty() {
-                m = m.with_api_key(self.key.clone());
-            }
-            if let Some(base) = retry_base {
-                m = m.with_retry_base(base);
-            }
-            Box::new(m)
-        } else {
-            let mut m = AnthropicModel::new(self.key.clone(), self.model.clone()).with_base_url(&self.anthropic_url).with_observer(observer);
-            if let Some(base) = retry_base {
-                m = m.with_retry_base(base);
-            }
-            Box::new(m)
+        let mut m = OpenAiCompatModel::new(self.base_url.clone(), self.model.clone()).with_observer(observer);
+        if !self.key.is_empty() {
+            m = m.with_api_key(self.key.clone());
         }
+        if let Some(base) = retry_base {
+            m = m.with_retry_base(base);
+        }
+        Box::new(m)
     }
 }
 
@@ -177,13 +161,7 @@ impl Runner {
         let gate = start_gate(ctx)?;
         let fp = fingerprint(gate.key.expose());
         let calls = CallLog::new(sink.clone(), fp.clone());
-        let model_spec = ModelSpec {
-            provider: gate.provider.clone(),
-            anthropic_url: ctx.anthropic_url.clone(),
-            local_base_url: gate.local_base_url.clone(),
-            key: gate.key.clone(),
-            model: gate.model.clone(),
-        };
+        let model_spec = ModelSpec { base_url: gate.local_base_url.clone(), key: gate.key.clone(), model: gate.model.clone() };
         let model = model_spec.build(calls.observer(), None);
         let space = ctx.space();
         let board = Board::new(&space, gate.heartbeat_interval_s, Some(calls.clone()));

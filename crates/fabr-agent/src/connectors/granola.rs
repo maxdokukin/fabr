@@ -109,6 +109,7 @@ fn collect(value: &Value, out: &mut Vec<Note>, seen: &mut std::collections::BTre
             }
         }
         Value::Object(map) => {
+            #[allow(clippy::collapsible_if)]
             if let Some(note) = note_from_object(map) {
                 if seen.insert(note.id.clone()) {
                     out.push(note);
@@ -131,8 +132,8 @@ fn note_from_object(map: &serde_json::Map<String, Value>) -> Option<Note> {
     if title.is_none() && body.is_none() {
         return None;
     }
-    let created_at = first_str(map, &["created_at", "createdAt", "created", "date", "updated_at", "updatedAt", "timestamp"])
-        .unwrap_or_default();
+    let created_at =
+        first_str(map, &["created_at", "createdAt", "created", "date", "updated_at", "updatedAt", "timestamp"]).unwrap_or_default();
     let title = title.unwrap_or_else(|| "(untitled)".to_string());
     let body = body.unwrap_or_default();
     let id = first_str(map, &["id", "document_id", "documentId", "uuid", "_id", "slug"]).unwrap_or_else(|| synth_id(&title, &created_at));
@@ -250,7 +251,8 @@ mod tests {
     #[test]
     fn search_is_case_insensitive_over_titles_and_bodies() {
         let notes = parse_notes(FIXTURE);
-        let hits: Vec<_> = notes.iter().filter(|n| n.title.to_lowercase().contains("sync") || n.body.to_lowercase().contains("sync")).collect();
+        let hits: Vec<_> =
+            notes.iter().filter(|n| n.title.to_lowercase().contains("sync") || n.body.to_lowercase().contains("sync")).collect();
         assert_eq!(hits.len(), 1);
         let budget: Vec<_> = notes.iter().filter(|n| n.body.to_lowercase().contains("budget")).collect();
         assert_eq!(budget.len(), 1);

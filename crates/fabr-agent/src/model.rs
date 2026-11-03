@@ -89,21 +89,6 @@ impl Message {
     pub fn assistant(content: Vec<Block>) -> Message {
         Message { role: "assistant", content }
     }
-
-    fn to_json(&self) -> serde_json::Value {
-        let blocks: Vec<serde_json::Value> = self
-            .content
-            .iter()
-            .map(|b| match b {
-                Block::Text(text) => serde_json::json!({"type": "text", "text": text}),
-                Block::ToolUse { id, name, input } => serde_json::json!({"type": "tool_use", "id": id, "name": name, "input": input}),
-                Block::ToolResult { id, content, is_error } => {
-                    serde_json::json!({"type": "tool_result", "tool_use_id": id, "content": content, "is_error": is_error})
-                }
-            })
-            .collect();
-        serde_json::json!({"role": self.role, "content": blocks})
-    }
 }
 
 pub struct ExecuteInput<'a> {
@@ -387,238 +372,18 @@ pub struct ModelCall {
 
 pub type CallObserver = std::sync::Arc<dyn Fn(&ModelCall) + Send + Sync>;
 
-pub struct AnthropicModel {
-    api_key: Secret,
-    model: String,
-    base_url: String,
-    observer: Option<CallObserver>,
-    http: ureq::Agent,
-    retry_base: std::time::Duration,
-    bounds: Mutex<Vec<BoundDraft>>,
-}
-
 pub const MAX_TOKENS: u32 = 4096;
 const TRIES: u32 = 3;
 const RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(8);
 const RETRY_AFTER_CAP: std::time::Duration = std::time::Duration::from_secs(30);
 
-impl std::fmt::Debug for AnthropicModel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AnthropicModel").field("model", &self.model).finish_non_exhaustive()
-    }
-}
-
-impl AnthropicModel {
-    pub fn new(api_key: Secret, model: impl Into<String>) -> Self {
-        Self {
-            api_key,
-            model: model.into(),
-            base_url: "https://api.anthropic.com".into(),
-            observer: None,
-            http: ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(60)).build(),
-            retry_base: std::time::Duration::from_secs(1),
-            bounds: Mutex::new(Vec::new()),
-        }
-    }
-
-    pub fn with_retry_base(mut self, base: std::time::Duration) -> Self {
-        self.retry_base = base;
-        self
-    }
-
-    pub fn with_base_url(mut self, url: &str) -> Self {
-        self.base_url = url.trim_end_matches('/').to_string();
-        self
-    }
-
-    pub fn with_observer(mut self, observer: CallObserver) -> Self {
-        self.observer = Some(observer);
-        self
-    }
-
-    fn send_once(&self, body: &serde_json::Value) -> Result<String, (FabrError, bool, Option<std::time::Duration>)> {
-        let sent = self
-            .http
-            .post(&format!("{}/v1/messages", self.base_url))
-            .set("x-api-key", self.api_key.expose())
-            .set("anthropic-version", "2023-06-01")
-            .set("content-type", "application/json")
-            .send_json(body);
-        match sent {
-            Ok(r) => r.into_string().map_err(|e| (FabrError::Remote(e.to_string()), true, None)),
-            Err(ureq::Error::Status(code, r)) => {
-                let wait = r.header("retry-after").and_then(|v| v.trim().parse::<u64>().ok()).map(std::time::Duration::from_secs);
-                let text = r.into_string().map_err(|e| (FabrError::Remote(e.to_string()), false, None))?;
-                let retry = code == 429 || code >= 500;
-                Err((FabrError::Remote(format!("anthropic {code}: {text}")), retry, wait))
-            }
-            Err(e) => Err((FabrError::Remote(e.to_string()), true, None)),
-        }
-    }
-
-    fn delay(&self, attempt: u32, hint: Option<std::time::Duration>) -> std::time::Duration {
-        let backoff = self.retry_base.saturating_mul(1 << (attempt - 1)).min(RETRY_CAP);
-        hint.map_or(backoff, |h| h.min(RETRY_AFTER_CAP))
-    }
-
-    fn post(&self, step: &'static str, body: serde_json::Value) -> Result<serde_json::Value, FabrError> {
-        let mut attempt = 1;
-        let text = loop {
-            match self.send_once(&body) {
-                Ok(text) => break text,
-                Err((err, retry, hint)) if retry && attempt < TRIES => {
-                    log::warn!("anthropic {step} attempt {attempt} failed: {}; retrying", fabr_core::redact::redact(&err.message()));
-                    std::thread::sleep(self.delay(attempt, hint));
-                    attempt += 1;
-                }
-                Err((err, _, _)) => return Err(err),
-            }
-        };
-        let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| FabrError::Remote(format!("anthropic response: {e}")))?;
-        if let Some(observer) = &self.observer {
-            let usage = |k: &str| value.get("usage").and_then(|u| u.get(k)).and_then(|n| n.as_u64());
-            observer(&ModelCall {
-                step,
-                model: self.model.clone(),
-                input_tokens: usage("input_tokens"),
-                output_tokens: usage("output_tokens"),
-            });
-        }
-        if value.get("stop_reason").and_then(|r| r.as_str()) == Some("max_tokens") {
-            return Err(FabrError::Remote(format!("anthropic {step} response was cut off at max_tokens ({MAX_TOKENS})")));
-        }
-        Ok(value)
-    }
-}
-
-impl Model for AnthropicModel {
-    fn planned_bounds(&self) -> Vec<BoundDraft> {
-        self.bounds.lock().map(|guard| guard.clone()).unwrap_or_default()
-    }
-
-    fn define(&self, title: &str, context: &str) -> Result<DefineDraft, FabrError> {
-        let body = serde_json::json!({
-            "model": self.model,
-            "max_tokens": MAX_TOKENS,
-            "system": JSON_SYSTEM,
-            "messages": [{"role": "user", "content": define_prompt(title, context)}]
-        });
-        let value = self.post("define", body)?;
-        let text = text_of(&value)?;
-        parse_define(&text)
-    }
-
-    fn plan(&self, input: &PlanInput) -> Result<PlanDraft, FabrError> {
-        let body = serde_json::json!({
-            "model": self.model,
-            "max_tokens": MAX_TOKENS,
-            "system": JSON_SYSTEM,
-            "messages": [{"role": "user", "content": plan_prompt(input)}]
-        });
-        let value = self.post("plan", body)?;
-        let text = text_of(&value)?;
-        if let Ok(mut guard) = self.bounds.lock() {
-            *guard = bounds_from_plan(&text);
-        }
-        parse_plan(&text)
-    }
-
-    fn execute_turn(&self, input: &ExecuteInput, messages: &mut Vec<Message>) -> Result<ExecuteTurn, FabrError> {
-        let mut tool_defs = api_tools(input.tools);
-        tool_defs.push(serde_json::json!({
-            "name": "ask_user",
-            "description": ASK_USER_DESC,
-            "input_schema": {"type": "object", "properties": {"question": {"type": "string"}}, "required": ["question"]}
-        }));
-        let body = serde_json::json!({
-            "model": self.model,
-            "max_tokens": MAX_TOKENS,
-            "system": input.system,
-            "tools": tool_defs,
-            "messages": messages.iter().map(Message::to_json).collect::<Vec<_>>()
-        });
-        let value = self.post("execute", body)?;
-        let blocks = blocks_of(&value)?;
-        let stop_reason = value.get("stop_reason").and_then(|r| r.as_str()).unwrap_or("end_turn").to_string();
-        messages.push(Message::assistant(blocks.clone()));
-        let mut uses = Vec::new();
-        let mut text = String::new();
-        for block in &blocks {
-            match block {
-                Block::Text(t) => text.push_str(t),
-                Block::ToolUse { id, name, input } if name == "ask_user" => {
-                    let q = input.get("question").and_then(|q| q.as_str()).unwrap_or("").trim().to_string();
-                    if !q.is_empty() {
-                        return Ok(ExecuteTurn { outcome: TurnOutcome::Ask(q), stop_reason });
-                    }
-                    uses.push(ToolUse {
-                        id: id.clone(),
-                        call: ToolCall { name: name.clone(), path: String::new(), content: None, params: Some(input.clone()) },
-                    });
-                }
-                Block::ToolUse { id, name, input } => {
-                    let path = input.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
-                    let content = input.get("content").and_then(|c| c.as_str()).map(str::to_string);
-                    let params = input.as_object().is_some().then(|| input.clone());
-                    uses.push(ToolUse { id: id.clone(), call: ToolCall { name: name.clone(), path, content, params } });
-                }
-                Block::ToolResult { .. } => {}
-            }
-        }
-        let outcome = if uses.is_empty() { TurnOutcome::Done(text) } else { TurnOutcome::Tools(uses) };
-        Ok(ExecuteTurn { outcome, stop_reason })
-    }
-
-    fn evaluate(&self, input: &EvaluateInput) -> Result<EvalVerdict, FabrError> {
-        let system = EVALUATE_SYSTEM;
-        let tool_defs = api_tools(input.tools);
-        let mut messages = vec![Message::user(vec![Block::Text(evaluate_user_prompt(input))])];
-        let mut reads = 0usize;
-        for _ in 0..=input.max_reads + 2 {
-            let body = serde_json::json!({
-                "model": self.model,
-                "max_tokens": MAX_TOKENS,
-                "system": system,
-                "tools": tool_defs,
-                "messages": messages.iter().map(Message::to_json).collect::<Vec<_>>()
-            });
-            let value = self.post("evaluate", body)?;
-            let blocks = blocks_of(&value)?;
-            messages.push(Message::assistant(blocks.clone()));
-            let uses: Vec<&Block> = blocks.iter().filter(|b| matches!(b, Block::ToolUse { .. })).collect();
-            if uses.is_empty() {
-                return parse_verdict(&text_of(&value)?, input.assertions);
-            }
-            let mut results = Vec::new();
-            for block in uses {
-                let Block::ToolUse { id, name, input: args } = block else { continue };
-                let (content, is_error) = if reads >= input.max_reads {
-                    ("read budget used up; give your verdict now".to_string(), true)
-                } else if !input.tools.names().contains(name) {
-                    (format!("tool {name} is not available"), true)
-                } else {
-                    reads += 1;
-                    let path = args.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
-                    match input.tools.call(input.node_dir, &ToolCall { name: name.clone(), path, content: None, params: None }) {
-                        Ok(result) => (result, false),
-                        Err(e) => (e, true),
-                    }
-                };
-                results.push(Block::ToolResult { id: id.clone(), content, is_error });
-            }
-            messages.push(Message::user(results));
-        }
-        Err(FabrError::Remote("evaluator did not give a verdict".into()))
-    }
-}
-
 /// A model that speaks the OpenAI-compatible Chat Completions API.
 ///
-/// One impl covers both Ollama (`http://localhost:11434/v1`) and
-/// LM Studio / `mlx_lm.server` (`http://localhost:1234/v1`): the endpoint is
-/// selected entirely by `base_url`, which must already include the `/v1` suffix.
-/// Requests go to `{base_url}/chat/completions`.
-pub struct LocalModel {
+/// Supports local hosting services (oMLX, LM Studio, Jan, AnythingLLM,
+/// MLX LM, BaseRT, llama.cpp, Ollama) as well as OpenAI-compatible cloud services.
+/// The endpoint is normalized by `base_url` to ensure the `/v1` prefix is present
+/// without duplication. Requests go to `{base_url}/chat/completions`.
+pub struct OpenAiCompatModel {
     model: String,
     base_url: String,
     api_key: Option<Secret>,
@@ -628,18 +393,21 @@ pub struct LocalModel {
     bounds: Mutex<Vec<BoundDraft>>,
 }
 
-impl std::fmt::Debug for LocalModel {
+impl std::fmt::Debug for OpenAiCompatModel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LocalModel").field("model", &self.model).finish_non_exhaustive()
+        f.debug_struct("OpenAiCompatModel").field("model", &self.model).finish_non_exhaustive()
     }
 }
 
-impl LocalModel {
-    /// `base_url` must already include the `/v1` suffix, e.g. `http://localhost:11434/v1`.
+impl OpenAiCompatModel {
+    /// Constructs a new `OpenAiCompatModel`.
+    /// Normalizes `base_url` so that trailing slashes are stripped and `/v1` is cleanly ensured.
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
+        let trimmed = base_url.into().trim_end_matches('/').to_string();
+        let normalized = if trimmed.ends_with("/v1") { trimmed } else { format!("{trimmed}/v1") };
         Self {
             model: model.into(),
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url: normalized,
             api_key: None,
             observer: None,
             http: ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(60)).build(),
@@ -648,7 +416,11 @@ impl LocalModel {
         }
     }
 
-    /// Send `Authorization: Bearer <key>`. Ollama needs no key; LM Studio ignores it.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Send `Authorization: Bearer <key>`. Optional for local servers (Ollama, LM Studio).
     pub fn with_api_key(mut self, key: Secret) -> Self {
         self.api_key = Some(key);
         self
@@ -664,11 +436,35 @@ impl LocalModel {
         self
     }
 
+    /// Query `{base_url}/models` to discover models supported by the server.
+    #[allow(clippy::collapsible_if)]
+    pub fn models(&self) -> Result<Vec<String>, FabrError> {
+        let mut req = self.http.get(&format!("{}/models", self.base_url)).set("content-type", "application/json");
+        if let Some(key) = &self.api_key {
+            if !key.is_empty() {
+                req = req.set("authorization", &format!("Bearer {}", key.expose()));
+            }
+        }
+        match req.call() {
+            Ok(resp) => {
+                let v: serde_json::Value = resp.into_json().map_err(|e| FabrError::Remote(format!("models error: {e}")))?;
+                let mut list = Vec::new();
+                if let Some(data) = v.get("data").and_then(|d| d.as_array()) {
+                    for item in data {
+                        if let Some(id) = item.get("id").and_then(|id| id.as_str()) {
+                            list.push(id.to_string());
+                        }
+                    }
+                }
+                Ok(list)
+            }
+            Err(e) => Err(FabrError::Remote(format!("failed to fetch models: {e}"))),
+        }
+    }
+
+    #[allow(clippy::collapsible_if)]
     fn send_once(&self, body: &serde_json::Value) -> Result<String, (FabrError, bool, Option<std::time::Duration>)> {
-        let mut req = self
-            .http
-            .post(&format!("{}/chat/completions", self.base_url))
-            .set("content-type", "application/json");
+        let mut req = self.http.post(&format!("{}/chat/completions", self.base_url)).set("content-type", "application/json");
         if let Some(key) = &self.api_key {
             if !key.is_empty() {
                 req = req.set("authorization", &format!("Bearer {}", key.expose()));
@@ -714,6 +510,9 @@ impl LocalModel {
                 output_tokens: usage("completion_tokens"),
             });
         }
+        if openai_finish_reason(&value) == "length" {
+            return Err(FabrError::Remote(format!("local {step} response was cut off at max_tokens ({MAX_TOKENS})")));
+        }
         Ok(value)
     }
 
@@ -721,6 +520,7 @@ impl LocalModel {
         let mut body = serde_json::json!({
             "model": self.model,
             "temperature": 0,
+            "max_tokens": MAX_TOKENS,
             "messages": openai_messages(system, messages),
         });
         if let Some(defs) = tools {
@@ -733,7 +533,7 @@ impl LocalModel {
     }
 }
 
-impl Model for LocalModel {
+impl Model for OpenAiCompatModel {
     fn planned_bounds(&self) -> Vec<BoundDraft> {
         self.bounds.lock().map(|guard| guard.clone()).unwrap_or_default()
     }
@@ -903,6 +703,7 @@ fn openai_messages(system: &str, messages: &[Message]) -> Vec<serde_json::Value>
 }
 
 /// Parse an OpenAI chat response's first choice into our `Block` list.
+#[allow(clippy::collapsible_if)]
 fn openai_blocks(value: &serde_json::Value) -> Result<Vec<Block>, FabrError> {
     let message = value
         .get("choices")
@@ -922,11 +723,7 @@ fn openai_blocks(value: &serde_json::Value) -> Result<Vec<Block>, FabrError> {
             let name = func.and_then(|f| f.get("name")).and_then(|n| n.as_str()).unwrap_or("").to_string();
             let args = func.and_then(|f| f.get("arguments")).and_then(|a| a.as_str()).unwrap_or("{}");
             let input = serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
-            out.push(Block::ToolUse {
-                id: call.get("id").and_then(|n| n.as_str()).unwrap_or("").to_string(),
-                name,
-                input,
-            });
+            out.push(Block::ToolUse { id: call.get("id").and_then(|n| n.as_str()).unwrap_or("").to_string(), name, input });
         }
     }
     Ok(out)
@@ -954,14 +751,6 @@ fn openai_text(value: &serde_json::Value) -> Result<String, FabrError> {
         .and_then(|c| c.as_str())
         .unwrap_or("");
     if text.is_empty() { Err(FabrError::Remote("local model returned no text".into())) } else { Ok(text.to_string()) }
-}
-
-fn api_tools(tools: &dyn ToolSet) -> Vec<serde_json::Value> {
-    tools.specs().iter().map(api_tool).collect()
-}
-
-fn api_tool(spec: &ToolSpec) -> serde_json::Value {
-    serde_json::json!({"name": spec.name, "description": spec.description, "input_schema": spec.input_schema})
 }
 
 /// System string that tells the model to reply with only a JSON object.
@@ -1029,28 +818,6 @@ fn evaluate_user_prompt(input: &EvaluateInput) -> String {
     prompt
 }
 
-fn blocks_of(value: &serde_json::Value) -> Result<Vec<Block>, FabrError> {
-    let raw =
-        value.get("content").and_then(|c| c.as_array()).ok_or_else(|| FabrError::Remote("anthropic response has no content".into()))?;
-    let mut out = Vec::new();
-    for block in raw {
-        match block.get("type").and_then(|t| t.as_str()) {
-            Some("text") => {
-                if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
-                    out.push(Block::Text(t.to_string()));
-                }
-            }
-            Some("tool_use") => out.push(Block::ToolUse {
-                id: block.get("id").and_then(|n| n.as_str()).unwrap_or("").to_string(),
-                name: block.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
-                input: block.get("input").cloned().unwrap_or(serde_json::Value::Null),
-            }),
-            _ => {}
-        }
-    }
-    Ok(out)
-}
-
 #[derive(Deserialize)]
 struct RawVerdict {
     #[serde(default)]
@@ -1083,20 +850,6 @@ fn parse_verdict(text: &str, assertions: &[Assertion]) -> Result<EvalVerdict, Fa
         })
         .collect();
     Ok(EvalVerdict { items })
-}
-
-fn text_of(value: &serde_json::Value) -> Result<String, FabrError> {
-    let mut out = String::new();
-    for block in
-        value.get("content").and_then(|c| c.as_array()).ok_or_else(|| FabrError::Remote("anthropic response has no content".into()))?
-    {
-        if block.get("type").and_then(|t| t.as_str()) == Some("text")
-            && let Some(text) = block.get("text").and_then(|t| t.as_str())
-        {
-            out.push_str(text);
-        }
-    }
-    if out.is_empty() { Err(FabrError::Remote("anthropic returned no text".into())) } else { Ok(out) }
 }
 
 #[derive(Deserialize)]
@@ -1210,7 +963,7 @@ mod unit {
 
     #[test]
     fn backoff_doubles_and_is_capped() {
-        let m = AnthropicModel::new(Secret::new("k"), "m");
+        let m = OpenAiCompatModel::new("http://localhost:11434", "m");
         assert_eq!(m.delay(1, None), std::time::Duration::from_secs(1));
         assert_eq!(m.delay(2, None), std::time::Duration::from_secs(2));
         assert_eq!(m.delay(9, None), RETRY_CAP);
@@ -1293,10 +1046,7 @@ mod unit {
         });
         let blocks = openai_blocks(&value).unwrap();
         assert_eq!(blocks[0], Block::Text("thinking".into()));
-        assert_eq!(
-            blocks[1],
-            Block::ToolUse { id: "c1".into(), name: "list_dir".into(), input: serde_json::json!({"path": "."}) }
-        );
+        assert_eq!(blocks[1], Block::ToolUse { id: "c1".into(), name: "list_dir".into(), input: serde_json::json!({"path": "."}) });
         assert_eq!(openai_finish_reason(&value), "tool_calls");
 
         let plain = serde_json::json!({"choices": [{"finish_reason": "stop", "message": {"content": "{\"ok\":1}"}}]});
@@ -1304,11 +1054,17 @@ mod unit {
     }
 
     #[test]
-    fn local_model_trims_trailing_slash() {
-        let m = LocalModel::new("http://localhost:11434/v1/", "qwen2.5");
-        assert_eq!(m.base_url, "http://localhost:11434/v1");
-        assert_eq!(m.delay(1, None), std::time::Duration::from_secs(1));
-        assert_eq!(m.delay(9, None), RETRY_CAP);
+    fn openai_compat_model_normalizes_url() {
+        let m1 = OpenAiCompatModel::new("http://localhost:11434/v1/", "qwen2.5");
+        assert_eq!(m1.base_url, "http://localhost:11434/v1");
+        assert_eq!(m1.delay(1, None), std::time::Duration::from_secs(1));
+        assert_eq!(m1.delay(9, None), RETRY_CAP);
+
+        let m2 = OpenAiCompatModel::new("http://localhost:11434", "qwen2.5");
+        assert_eq!(m2.base_url, "http://localhost:11434/v1");
+
+        let m3 = OpenAiCompatModel::new("http://localhost:1234/v1", "llama-3");
+        assert_eq!(m3.base_url, "http://localhost:1234/v1");
     }
 }
 
@@ -1317,22 +1073,15 @@ mod live {
     use super::*;
 
     #[test]
-    #[ignore = "reads ANTHROPIC_API_KEY from the environment"]
-    fn live_anthropic_smoke() {
-        let key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY");
-        let model = std::env::var("FABR_ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-sonnet-5-5".into());
-        let client = AnthropicModel::new(Secret::new(key), model);
+    #[ignore = "needs a running local server (Ollama / LM Studio / mlx_lm.server / Jan / etc.)"]
+    fn live_openai_compat_smoke() {
+        let base = std::env::var("FABR_OPENAI_COMPAT_BASE_URL")
+            .or_else(|_| std::env::var("FABR_LOCAL_BASE_URL"))
+            .unwrap_or_else(|_| "http://localhost:11434/v1".into());
+        let model =
+            std::env::var("FABR_OPENAI_COMPAT_MODEL").or_else(|_| std::env::var("FABR_LOCAL_MODEL")).unwrap_or_else(|_| "qwen2.5".into());
+        let client = OpenAiCompatModel::new(base, model);
         let defined = client.define("add greet.txt that contains hi", "").expect("live define");
-        assert!(defined.question.is_some() || !defined.spec.trim().is_empty());
-    }
-
-    #[test]
-    #[ignore = "needs a running local server (Ollama / LM Studio / mlx_lm.server)"]
-    fn live_local_smoke() {
-        let base = std::env::var("FABR_LOCAL_BASE_URL").unwrap_or_else(|_| "http://localhost:11434/v1".into());
-        let model = std::env::var("FABR_LOCAL_MODEL").unwrap_or_else(|_| "qwen2.5".into());
-        let client = LocalModel::new(base, model);
-        let defined = client.define("add greet.txt that contains hi", "").expect("live local define");
         assert!(defined.question.is_some() || !defined.spec.trim().is_empty());
     }
 }

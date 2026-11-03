@@ -2,6 +2,7 @@ pub mod board;
 pub mod caps;
 pub mod connectors;
 pub mod credentials;
+pub mod lantern;
 pub mod lifecycle;
 pub mod link;
 pub mod model;
@@ -19,8 +20,8 @@ pub mod verify;
 pub use caps::Harness;
 pub use lifecycle::{Ctl, advance_with, approval_allows_execute, registry_path, task_path_key};
 pub use model::{
-    AnthropicModel, Block, CallObserver, DefineDraft, EvalVerdict, EvaluateInput, ExecuteInput, ExecuteTurn, JudgedItem, Judgement,
-    LocalModel, Message, Model, ModelCall, PlanDraft, PlanInput, ScriptedModel, ScriptedTurn, ToolCall, ToolUse, TurnOutcome,
+    Block, CallObserver, DefineDraft, EvalVerdict, EvaluateInput, ExecuteInput, ExecuteTurn, JudgedItem, Judgement, Message, Model,
+    ModelCall, OpenAiCompatModel, PlanDraft, PlanInput, ScriptedModel, ScriptedTurn, ToolCall, ToolUse, TurnOutcome,
 };
 pub use run::run_once;
 pub use settings::{AgentSettings, load_agent_settings};

@@ -15,7 +15,7 @@ pub struct AgentSettings {
     pub completed_steps: Vec<String>,
 }
 
-pub const DEFAULT_PROVIDER: &str = "anthropic";
+pub const DEFAULT_PROVIDER: &str = "local";
 pub const DEFAULT_LOCAL_BASE_URL: &str = "http://localhost:11434/v1";
 
 pub fn load_agent_settings(dir: &Path) -> Result<AgentSettings, FabrError> {
@@ -43,7 +43,7 @@ pub fn load_agent_settings(dir: &Path) -> Result<AgentSettings, FabrError> {
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
         .unwrap_or_default();
-    let key = secrets.get("anthropic_api_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let key = secrets.get("api_key").or_else(|| secrets.get("anthropic_api_key")).and_then(|v| v.as_str()).unwrap_or("").to_string();
     let api_key = Secret::new(key);
     let settings = AgentSettings {
         default_folder,
@@ -65,11 +65,7 @@ pub const DEFAULT_EXECUTE_MAX_TURNS: u32 = 12;
 pub const DEFAULT_EVALUATE_MAX_READS: usize = 6;
 
 pub fn require_ready(s: &AgentSettings) -> Result<(), FabrError> {
-    let local = s.provider == "local";
-    // A local provider (Ollama / MLX) needs no Anthropic key, so neither the
-    // "api_key" setup step nor a saved key is required for it. The "model" value
-    // stays required for both providers.
-    let steps: &[&str] = if local { &["folder", "model"] } else { &["folder", "api_key", "model"] };
+    let steps: &[&str] = &["folder", "model"];
     for step in steps {
         if !s.completed_steps.iter().any(|have| have == step) {
             return Err(FabrError::BadRequest(format!("setup is missing {step}")));
@@ -77,9 +73,6 @@ pub fn require_ready(s: &AgentSettings) -> Result<(), FabrError> {
     }
     if s.model.is_empty() {
         return Err(FabrError::BadRequest("model is required".into()));
-    }
-    if !local && s.api_key.is_empty() {
-        return Err(FabrError::BadRequest("api key is required".into()));
     }
     Ok(())
 }

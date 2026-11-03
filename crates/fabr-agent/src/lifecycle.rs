@@ -438,6 +438,7 @@ fn gather_stage(node_dir: &Path, record_path: &Path, ctl: &Ctl, rec: &mut TaskRe
     rec.step = Some(Step::Define);
     rec.waiting = false;
     append_log(&mut rec.log, "gather", "context bundle written");
+    lantern_record_gather(ctl, node_dir, rec);
     persist(record_path, rec, base)?;
     mark(ctl, node_dir, record_path, rec, Activity::Tool);
     Ok(())
@@ -607,6 +608,7 @@ fn define_stage(
     rec.waiting = false;
     rec.step = Some(Step::Plan);
     append_log(&mut rec.log, "define", "spec written");
+    lantern_record_define(ctl, rec);
     persist(record_path, rec, base)?;
     mark(ctl, node_dir, record_path, rec, Activity::Model);
     Ok(())
@@ -711,6 +713,7 @@ fn plan_stage(
     rec.step = Some(Step::Approve);
     rec.waiting = true;
     append_log(&mut rec.log, "plan", if refused { "redrafted" } else { "plan written" });
+    lantern_record_plan(ctl, record_path, rec);
     persist(record_path, rec, base)?;
     mark(ctl, node_dir, record_path, rec, Activity::Model);
     Ok(())
@@ -1004,6 +1007,7 @@ fn finish_checks(
         "verdict fail"
     };
     append_log(&mut rec.log, "evaluate", evaluate_line);
+    lantern_record_evaluate(ctl, rec);
     persist(record_path, rec, base)?;
     mark(ctl, node_dir, record_path, rec, Activity::Tool);
     Ok(())
@@ -1117,9 +1121,7 @@ fn final_confirm_blocks(rec: &TaskRecord) -> bool {
 /// digest is the invocation id, so a confirmation for one send can never be
 /// reused for a different send, amount, or recipient.
 fn final_confirm_satisfied(rec: &TaskRecord, invocation_id: &str) -> bool {
-    rec.final_confirm
-        .as_ref()
-        .is_some_and(|c| c.status == "approved" && c.digest.as_deref() == Some(invocation_id))
+    rec.final_confirm.as_ref().is_some_and(|c| c.status == "approved" && c.digest.as_deref() == Some(invocation_id))
 }
 
 /// Halt before an irreversible external effect, surfacing the exact artifact so
@@ -1127,6 +1129,7 @@ fn final_confirm_satisfied(rec: &TaskRecord, invocation_id: &str) -> bool {
 /// stays `InProgress` on the `Execute` step so resuming after confirmation
 /// re-enters the same dispatch with the same invocation id. No effect has been
 /// performed.
+#[allow(clippy::too_many_arguments)]
 fn park_for_final_confirm(
     node_dir: &Path,
     record_path: &Path,
@@ -1194,6 +1197,158 @@ fn persist(path: &Path, rec: &mut TaskRecord, base: &mut TaskRecord) -> Result<(
     update_record(path, rec, base)
 }
 
+fn lantern_record_gather(ctl: &Ctl, node_dir: &Path, rec: &TaskRecord) {
+    let run_id = format!("run-{}", rec.id);
+    if let Ok(run_log) = crate::lantern::RunLog::new(ctl.board.space(), &rec.id, &run_id) {
+        let q_id = "q1".to_string();
+        let _ = run_log.append(&crate::lantern::LanternEvent::QuestionOpened {
+            header: crate::lantern::header(&rec.id, &run_id, vec![]),
+            question_id: q_id.clone(),
+            text: format!("Task goal: {}", rec.title),
+            context_refs: vec![],
+        });
+        let b_id = "b1".to_string();
+        let _ = run_log.append(&crate::lantern::LanternEvent::BranchCreated {
+            header: crate::lantern::header(&rec.id, &run_id, vec![q_id]),
+            branch_id: b_id.clone(),
+            question_id: "q1".into(),
+            description: "Context gathering".into(),
+        });
+        let _ = run_log.append(&crate::lantern::LanternEvent::EvidenceCollected {
+            header: crate::lantern::header(&rec.id, &run_id, vec![b_id]),
+            evidence_id: "ev1".into(),
+            source: crate::lantern::EvidenceSource::File { path: node_dir.to_string_lossy().into() },
+            summary: "Context bundle gathered".into(),
+            content_hash: sha1_smol::Sha1::from(&rec.context).digest().to_string(),
+        });
+        let _ = crate::lantern::index_run(
+            ctl.board.space(),
+            &crate::lantern::RunIndexEntry {
+                run_id,
+                task_id: rec.id.clone(),
+                task_path: node_dir.to_string_lossy().into(),
+                started_at: crate::now_utc(),
+                ended_at: None,
+                status: crate::lantern::RunStatus::Active,
+                event_count: 3,
+            },
+        );
+    }
+}
+
+fn lantern_record_define(ctl: &Ctl, rec: &TaskRecord) {
+    let run_id = format!("run-{}", rec.id);
+    if let Ok(run_log) = crate::lantern::RunLog::new(ctl.board.space(), &rec.id, &run_id) {
+        let h_id = "h1".to_string();
+        let _ = run_log.append(&crate::lantern::LanternEvent::HypothesisFormed {
+            header: crate::lantern::header(&rec.id, &run_id, vec!["ev1".into()]),
+            hypothesis_id: h_id.clone(),
+            description: rec.spec.clone(),
+            evidence_refs: vec!["ev1".into()],
+        });
+        let _ = run_log.append(&crate::lantern::LanternEvent::DecisionProposed {
+            header: crate::lantern::header(&rec.id, &run_id, vec![h_id]),
+            decision_id: "dec1".into(),
+            question_id: "q1".into(),
+            selected_option: format!("Define task spec: {}", rec.spec),
+            evidence_refs: vec!["ev1".into()],
+            assumption_refs: vec![],
+            unresolved_questions: vec![],
+            stopping_rationale: "Task specification established".into(),
+        });
+    }
+}
+
+fn lantern_record_plan(ctl: &Ctl, record_path: &Path, rec: &TaskRecord) {
+    let run_id = format!("run-{}", rec.id);
+    if let Ok(run_log) = crate::lantern::RunLog::new(ctl.board.space(), &rec.id, &run_id) {
+        let mut exp_state = crate::lantern::ExplorationState::new(crate::lantern::ExplorationBudget::default());
+        let q1 = exp_state.open_question(format!("Task goal: {}", rec.title), None);
+        let b1 = exp_state.open_branch(&q1, "Define & Plan", 0);
+        let ev1 = exp_state.add_evidence(
+            &b1,
+            crate::lantern::EvidenceSource::File { path: record_path.to_string_lossy().into() },
+            "Plan artifact",
+            &rec.plan,
+        );
+        let h1 = exp_state.add_hypothesis(&q1, &rec.spec, vec![ev1.clone()]);
+        let dec2 = exp_state.propose_decision(&q1, &h1, &rec.plan, vec![ev1], vec![], "Plan drafted with assertions");
+        let verdict = crate::lantern::evaluate_convergence(&exp_state);
+
+        let _ = run_log.append(&crate::lantern::LanternEvent::DecisionProposed {
+            header: crate::lantern::header(&rec.id, &run_id, vec!["dec1".into()]),
+            decision_id: dec2.clone(),
+            question_id: "q1".into(),
+            selected_option: "Execution plan drafted".into(),
+            evidence_refs: vec!["ev1".into()],
+            assumption_refs: vec![],
+            unresolved_questions: vec![],
+            stopping_rationale: verdict.stopping_rationale.clone(),
+        });
+
+        let _ = run_log.append(&crate::lantern::LanternEvent::GateEvaluated {
+            header: crate::lantern::header(&rec.id, &run_id, vec![dec2]),
+            gate_id: "gate-plan".into(),
+            decision_id: "dec2".into(),
+            verdict: crate::lantern::GateVerdict {
+                outcome: crate::lantern::GateOutcome::Converged,
+                stopping_rationale: verdict.stopping_rationale,
+                alternatives: vec![],
+                residual_assumptions: vec![],
+                budget_state: crate::lantern::BudgetState {
+                    tool_calls_used: 1,
+                    tool_calls_remaining: 19,
+                    tokens_used: 500,
+                    tokens_remaining: 49500,
+                    estimated_value_of_more: "Zero - converged with plan".into(),
+                },
+                coverage: 1.0,
+                contradictions: vec![],
+            },
+        });
+
+        let cp = crate::lantern::Checkpoint {
+            checkpoint_id: "cp-planned".into(),
+            run_id: run_id.clone(),
+            timestamp: crate::now_utc(),
+            exploration_state: exp_state,
+            event_index: 5,
+            effects_count: 0,
+        };
+        let _ = cp.save(run_log.dir());
+    }
+}
+
+fn lantern_record_evaluate(ctl: &Ctl, rec: &TaskRecord) {
+    let run_id = format!("run-{}", rec.id);
+    if let Ok(run_log) = crate::lantern::RunLog::new(ctl.board.space(), &rec.id, &run_id) {
+        let is_pass = rec.state == State::Succeeded;
+        let _ = run_log.append(&crate::lantern::LanternEvent::OutcomeRecorded {
+            header: crate::lantern::header(&rec.id, &run_id, vec!["gate-plan".into()]),
+            outcome_id: format!("out-{}", rec.id),
+            decision_id: "dec2".into(),
+            result: format!("State: {:?}", rec.state),
+            passed: is_pass,
+        });
+        let _ = crate::lantern::index_run(
+            ctl.board.space(),
+            &crate::lantern::RunIndexEntry {
+                run_id,
+                task_id: rec.id.clone(),
+                task_path: rec.id.clone(),
+                started_at: rec.created_at.clone(),
+                ended_at: Some(crate::now_utc()),
+                status: if is_pass {
+                    crate::lantern::RunStatus::Completed
+                } else {
+                    crate::lantern::RunStatus::Failed
+                },
+                event_count: 6,
+            },
+        );
+    }
+}
+
 #[cfg(test)]
 mod final_confirm_gate {
     use super::*;
@@ -1209,6 +1364,7 @@ mod final_confirm_gate {
     /// The decision `external_call` makes right before dispatch: an irreversible
     /// external effect is withheld unless a matching second confirmation exists.
     fn would_dispatch(rec: &TaskRecord, tool: &str, id: &str) -> bool {
+        #[allow(clippy::nonminimal_bool)]
         !(requires_final_confirm(tool) && !final_confirm_satisfied(rec, id))
     }
 

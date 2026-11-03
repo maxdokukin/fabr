@@ -51,17 +51,17 @@ impl Fake {
                     }
                     let question = if asked { json!("Which filename?") } else { json!(null) };
                     let inner = json!({"spec": "write greet.md", "success": "greet.md exists", "assertions": [{"id": "a1", "text": "greet.md exists"}], "question": question});
-                    json!({"content": [{"type": "text", "text": inner.to_string()}], "usage": {"input_tokens": 120, "output_tokens": 45}})
+                    json!({"choices": [{"message": {"role": "assistant", "content": inner.to_string()}}], "usage": {"prompt_tokens": 120, "completion_tokens": 45}})
                         .to_string()
                 } else {
                     let inner = json!({"spec": "write greet.md", "success": "greet.md exists", "plan": "1. write it", "assertions": [{"id": "a1", "text": "greet.md exists"}],
                         "plan_meta": {"reversibility": "reversible", "tools": ["write_file"], "checks": [{"cmd": "test", "args": ["-f", "greet.md"]}]}});
-                    json!({"content": [{"type": "text", "text": inner.to_string()}], "usage": {"input_tokens": 300, "output_tokens": 80}})
+                    json!({"choices": [{"message": {"role": "assistant", "content": inner.to_string()}}], "usage": {"prompt_tokens": 300, "completion_tokens": 80}})
                         .to_string()
                 };
                 let text = if ct.load(Ordering::SeqCst) && code == 200 {
                     let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
-                    v["stop_reason"] = json!("max_tokens");
+                    v["choices"][0]["finish_reason"] = json!("length");
                     v.to_string()
                 } else {
                     text
@@ -105,14 +105,13 @@ fn env(url: &str, completed: bool, key: Option<&str>, model: &str) -> Env {
     std::fs::write(
         space.join("settings.toml"),
         format!(
-            "default_folder = \"{}\"\nmodel = \"{model}\"\nheartbeat_interval_s = 10\n\n[setup]\ncompleted_steps = [\"folder\", \"api_key\", \"model\"]\ncompleted = {completed}\n",
+            "default_folder = \"{}\"\nmodel = \"{model}\"\nlocal_base_url = \"{url}\"\nheartbeat_interval_s = 10\n\n[setup]\ncompleted_steps = [\"folder\", \"api_key\", \"model\"]\ncompleted = {completed}\n",
             proj.display()
         ),
     )
     .unwrap();
     std::fs::write(space.join("secrets.toml"), key.map(|k| format!("anthropic_api_key = \"{k}\"\n")).unwrap_or_default()).unwrap();
-    let mut ctx = Ctx::new(&home);
-    ctx.anthropic_url = url.to_string();
+    let ctx = Ctx::new(&home);
     Env { tmp, ctx, proj }
 }
 
@@ -179,8 +178,10 @@ fn refuses(e: &Env, needle: &str) {
 #[test]
 fn start_gate_refuses_without_setup() {
     refuses(&env("http://127.0.0.1:1", false, Some(KEY), "claude-sonnet-5-5"), "Setup is not complete");
-    refuses(&env("http://127.0.0.1:1", true, None, "claude-sonnet-5-5"), "API key");
     refuses(&env("http://127.0.0.1:1", true, Some(KEY), ""), "model");
+    let e_bad_folder = env("http://127.0.0.1:1", true, Some(KEY), "claude-sonnet-5-5");
+    std::fs::remove_dir_all(&e_bad_folder.proj).unwrap();
+    refuses(&e_bad_folder, "does not exist");
     let e = env("http://127.0.0.1:1", true, Some(KEY), "claude-sonnet-5-5");
     std::fs::remove_file(e.ctx.settings_path()).unwrap();
     refuses(&e, "Setup has not been started");
