@@ -7,7 +7,7 @@
   import Row from '../ui/Row.svelte';
   import ClaudeFields from './ClaudeFields.svelte';
   import { createSetupSource, type SetupSource } from './setup-source';
-  import { canGoBack, canSkip, firstIncompleteStep, markStep, next, prev, stepIndex, STEPS, type StepId } from './wizard';
+  import { canGoBack, canSkip, firstIncompleteStep, markStep, next, prev, skipStep, skipTo, stepIndex, STEPS, type StepId } from './wizard';
 
   let { source, initial, ondone }: { source?: SetupSource; initial?: FabricSettings; ondone?: () => void } = $props();
 
@@ -39,6 +39,7 @@
   let timer: ReturnType<typeof setInterval> | undefined;
 
   const stepNo = $derived(stepIndex(step) + 1);
+  const claudeDone = $derived(!!settings?.setup.completed_steps.includes('claude'));
 
   function enter(s: StepId) {
     step = s;
@@ -121,6 +122,22 @@
   }
 
   const go = (s: StepId) => enter(s);
+
+  async function skip() {
+    const from = step;
+    if (from === 'claude') {
+      busy = true;
+      try {
+        settings = (await src!.writeSettings(skipStep(settings!, from))).settings;
+      } catch (e) {
+        reason = errText(e);
+        return;
+      } finally {
+        busy = false;
+      }
+    }
+    go(skipTo(from));
+  }
 </script>
 
 <Page title={loadError === null ? TITLES[step] : 'Setup'}>
@@ -138,7 +155,7 @@
       </Group>
       <Button variant="primary" disabled={busy || !folder.trim()} onclick={checkFolder}>{busy ? 'Checking' : 'Check'}</Button>
     {:else if step === 'claude'}
-      <Group header="Claude Code runs your tasks" footer={reason ?? (found ? 'Claude Code is ready.' : 'Fabr uses the Claude Code program on this computer. Leave the path empty to find it automatically.')} error={!!reason}>
+      <Group header="Claude Code runs your tasks" footer={reason ?? (found ? 'Claude Code is ready.' : 'Fabr uses the Claude Code program on this computer. Leave the path empty to find it automatically. Without Claude Code here, press Skip: your tasks wait until you set it up in Settings.')} error={!!reason}>
         <ClaudeFields bind:bin={claudeBin} bind:model bind:effort {found} onbin={() => { passed = false; found = null; }} onpick={savePicks} />
       </Group>
       <Button variant="primary" disabled={busy} onclick={checkClaude}>{busy ? 'Checking' : 'Check'}</Button>
@@ -157,9 +174,9 @@
       </Group>
       <Button variant="primary" disabled={busy} onclick={startLink}>{reason ? 'Retry' : 'Start'}</Button>
     {:else}
-      <Group header="Summary" footer="You can change all of this later in Settings.">
+      <Group header="Summary" footer={claudeDone ? 'You can change all of this later in Settings.' : 'Tasks will not run on this computer until you set up Claude Code in Settings.'}>
         <Row label="Folder" value={settings.default_folder} />
-        <Row label="Claude Code" value={found?.version || 'ready'} />
+        <Row label="Claude Code" value={claudeDone ? found?.version || 'ready' : 'not set up'} />
         <Row label="Model" value={settings.model || 'default'} />
         <Row label="Telegram" value={settings.telegram_user_id ? `linked as ${settings.telegram_user_id}` : secrets.telegram_bot_token ? 'bot saved' : 'skipped'} />
       </Group>
@@ -168,7 +185,7 @@
 
     <div class="setup-nav">
       {#if canGoBack(step)}<Button variant="plain" disabled={busy} onclick={() => go(prev(step))}>Back</Button>{/if}
-      {#if canSkip(step) && !passed}<Button variant="plain" disabled={busy} onclick={() => go('done')}>Skip</Button>{/if}
+      {#if canSkip(step) && !passed}<Button variant="plain" disabled={busy} onclick={skip}>Skip</Button>{/if}
       {#if step !== 'done'}<Button variant="primary" disabled={!passed || busy} onclick={() => go(next(step))}>Next</Button>{/if}
     </div>
   {/if}

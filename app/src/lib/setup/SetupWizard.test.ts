@@ -33,7 +33,7 @@ describe('SetupWizard render', () => {
   it('the Claude Code screen has the program, model and effort fields', () => {
     const initial = settingsAt(1);
     const { body } = render(SetupWizard, { props: { source: new StubSetupSource({ settings: initial }), initial } });
-    for (const t of ['Program', 'Model', 'Effort', 'Sonnet', 'Fable', 'Extra high', '>Check<']) expect(body).toContain(t);
+    for (const t of ['Program', 'Model', 'Effort', 'Sonnet', 'Fable', 'Extra high', '>Check<', '>Skip<', 'press Skip']) expect(body).toContain(t);
     expect(body).not.toContain('API');
   });
 });

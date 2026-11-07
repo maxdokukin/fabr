@@ -1,5 +1,6 @@
 import { errText, type FabricCheckResult, type FabricSecretsStatus, type FabricSettings } from '../api/types';
 import { createSetupSource, type SetupSource } from '../setup/setup-source';
+import { markStep } from '../setup/wizard';
 
 export interface Outcome { ok: boolean; text: string; auth?: string }
 export type Probe = 'claude' | 'token' | 'link';
@@ -136,6 +137,14 @@ export class SetupPanel {
 
   testClaude(bin: string): Promise<void> {
     return this.probe('claude', () => this.src!.check('claude', { path: bin.trim() }), (r) => [r.version, r.path].filter(Boolean).join(' at ') || 'Claude Code works');
+  }
+
+  async useClaude(bin: string): Promise<void> {
+    await this.testClaude(bin);
+    if (!this.results.claude?.ok || !this.settings) return;
+    const setup = markStep($state.snapshot(this.settings) as FabricSettings, 'claude').setup;
+    if (!(await this.write({ claude_bin: bin.trim(), setup }))) return;
+    this.runnerError = (await this.src?.startAgent?.().catch(() => null)) ?? null;
   }
 
   testToken(): Promise<void> {

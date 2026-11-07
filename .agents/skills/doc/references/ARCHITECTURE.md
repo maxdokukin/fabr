@@ -62,7 +62,7 @@ Everything above the knowledge layer reads and writes the task record in the fol
 - Tasks are created from the node panel: an "Add task" line opens a sheet with title, due, priority, context, spec and success. A reminder is also what the UI labels a todo.
 - A stage bar for each node and each task, and an Agents sheet opened from the toolbar badge, show progress. Both are fed by the record's `step` and the registry entry.
 - Remote ssh nodes list their tasks read-only through the snapshot.
-- The app hosts the agent runner in-process. It starts when setup has the `folder` and `claude` steps and stops on exit, which also kills any running Claude Code process. `fabr agent` runs the same runner as a debug entry point.
+- The app hosts the agent runner in-process. It starts when setup is complete, refuses with a reason when Claude Code is missing, and stops on exit, which also kills any running Claude Code process. `fabr agent` runs the same runner as a debug entry point.
 - A task sheet lists its planner, executor and validator sessions with Open in terminal (`claude --resume <id>` in the task's folder), Copy command and Transcript.
 - The transcript sheet has a read-only chat box that resumes the session headlessly, so the user can discuss a plan with its own planner and then press Redo plan.
 - The CLI covers the same loop for terminal users: `fabr status`, `show`, `delegate`, `answer`, `approve`, `refuse`, `cancel`, `pause` and `resume` write through the GUI's write path with `by: cli`, and `fabr ask <task> --role plan|execute|evaluate` puts a read-only question to one of its sessions. `fabr track <folder> <session id>` adds a Claude Code session as a reminder.

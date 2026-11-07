@@ -74,8 +74,7 @@ pub fn start_gate(ctx: &Ctx) -> Result<Gate, FabrError> {
     let Some(claude_bin) = resolve_bin(&read.settings.claude_bin) else {
         let named = read.settings.claude_bin.trim();
         return Err(FabrError::BadRequest(if named.is_empty() {
-            "Claude Code was not found on PATH, so install it (the claude command) or set claude_bin in settings.toml to its full path."
-                .into()
+            "Claude Code is not set up on this computer. Install it, then press Check in Settings, Claude Code.".into()
         } else {
             format!("Claude Code was not found at {named}, so fix claude_bin in settings.toml or clear it to use claude from PATH.")
         }));

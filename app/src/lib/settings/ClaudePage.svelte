@@ -32,10 +32,7 @@
     execute = p.settings?.execute ?? 'full';
   });
 
-  async function check() {
-    await p.testClaude(bin);
-    if (p.results.claude?.ok) await p.write({ claude_bin: bin.trim() });
-  }
+  const check = () => p.useClaude(bin);
 </script>
 
 <Group header="Claude Code" footer="Fabr runs your tasks with the Claude Code program on this computer. Leave the program empty to find it automatically.">

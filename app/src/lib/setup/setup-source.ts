@@ -10,6 +10,7 @@ export interface SetupSource {
   secretsStatus(): Promise<FabricSecretsStatus>;
   check(kind: FabricCheckKind, args?: CheckArgs): Promise<FabricCheckResult>;
   telegramLink(timeoutS: number): Promise<FabricCheckResult>;
+  startAgent?(): Promise<string | null>;
 }
 
 type Api = Awaited<ReturnType<typeof createApi>>;
@@ -22,6 +23,7 @@ export class ApiSetupSource implements SetupSource {
   secretsStatus() { return this.api.fabricSecretsStatus(); }
   check(kind: FabricCheckKind, args: CheckArgs = {}) { return this.api.fabricCheck({ kind, ...args }); }
   telegramLink(timeoutS: number) { return this.api.fabricTelegramLink(timeoutS); }
+  startAgent() { return this.api.fabricAgentStart().then((s) => s.reason); }
 }
 
 export function fingerprint(key: string): string {
@@ -53,6 +55,7 @@ export class StubSetupSource implements SetupSource {
   outcomes: Partial<Record<StubKey, FabricCheckResult>>;
   delayMs: number;
   calls: string[] = [];
+  startAgent?: () => Promise<string | null>;
 
   constructor(opts: { settings?: FabricSettings; outcomes?: Partial<Record<StubKey, FabricCheckResult>>; delayMs?: number } = {}) {
     this.settings = structuredClone(opts.settings ?? emptySettings());

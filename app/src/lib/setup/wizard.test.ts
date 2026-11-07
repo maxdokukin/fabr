@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canGoBack, canSkip, firstIncompleteStep, markStep, next, prev, setupComplete, stepIndex } from './wizard';
+import { canGoBack, canSkip, firstIncompleteStep, markStep, next, prev, setupComplete, skipStep, skipTo, stepIndex } from './wizard';
 import { emptySettings } from './setup-source';
 
 const withSteps = (steps: string[], completed = false) => ({ ...emptySettings(), setup: { completed_steps: steps, completed } });
@@ -26,8 +26,18 @@ describe('wizard', () => {
     expect(prev('done')).toBe('telegram_link');
     expect(stepIndex('done')).toBe(4);
   });
-  it('only the telegram screens can be skipped', () => {
-    expect(['folder', 'claude', 'telegram_bot', 'telegram_link', 'done'].filter((s) => canSkip(s as never))).toEqual(['telegram_bot', 'telegram_link']);
+  it('every screen but the folder can be skipped', () => {
+    expect(['folder', 'claude', 'telegram_bot', 'telegram_link', 'done'].filter((s) => canSkip(s as never))).toEqual(['claude', 'telegram_bot', 'telegram_link']);
+    expect([skipTo('claude'), skipTo('telegram_bot'), skipTo('telegram_link')]).toEqual(['telegram_bot', 'done', 'done']);
+  });
+  it('a skipped Claude Code step completes setup without counting as done', () => {
+    const s = skipStep(markStep(emptySettings(), 'folder'), 'claude');
+    expect(s.setup).toEqual({ completed_steps: ['folder', 'claude_skipped'], completed: true });
+    expect(setupComplete(s)).toBe(true);
+    expect(firstIncompleteStep(s)).toBe('done');
+    expect(skipStep(s, 'claude')).toBe(s);
+    expect(markStep(s, 'claude').setup.completed_steps).toEqual(['folder', 'claude']);
+    expect(skipStep(markStep(s, 'claude'), 'claude').setup.completed_steps).toEqual(['folder', 'claude']);
   });
   it('completes once folder and claude are done', () => {
     let s = markStep(emptySettings(), 'folder');

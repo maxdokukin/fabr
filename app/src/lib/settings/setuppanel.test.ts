@@ -23,6 +23,32 @@ describe('setup panel', () => {
     expect(p.results.claude).toEqual({ ok: false, text: 'Claude Code is not installed.' });
   });
 
+  it('a passing check in settings replaces a skipped step and starts the agent', async () => {
+    const settings = { ...emptySettings(), default_folder: '~/', setup: { completed_steps: ['folder', 'claude_skipped'], completed: true } };
+    const { src, p } = await panel({ settings });
+    let started = 0;
+    src.startAgent = async () => { started += 1; return null; };
+    await p.useClaude(' /opt/claude ');
+    expect(src.settings.claude_bin).toBe('/opt/claude');
+    expect(src.settings.setup).toEqual({ completed_steps: ['folder', 'claude'], completed: true });
+    expect(p.claudeReady).toBe(true);
+    expect([started, p.runnerError]).toEqual([1, null]);
+  });
+
+  it('a failing check in settings keeps the skip and shows why the agent did not start', async () => {
+    const settings = { ...emptySettings(), default_folder: '~/', setup: { completed_steps: ['folder', 'claude_skipped'], completed: true } };
+    const { src, p } = await panel({ settings, outcomes: { claude: { ok: false, reason: 'Claude Code is not installed.' } } });
+    let started = 0;
+    src.startAgent = async () => { started += 1; return null; };
+    await p.useClaude('');
+    expect(src.settings.setup.completed_steps).toEqual(['folder', 'claude_skipped']);
+    expect(started).toBe(0);
+    src.outcomes = {};
+    src.startAgent = async () => 'Execution is off on this computer.';
+    await p.useClaude('');
+    expect(p.runnerError).toBe('Execution is off on this computer.');
+  });
+
   it('keeps the model, effort and program in settings', async () => {
     const { src, p } = await panel();
     expect(await p.write({ model: 'opus', effort: 'high', claude_bin: '/opt/claude' })).toBe(true);
