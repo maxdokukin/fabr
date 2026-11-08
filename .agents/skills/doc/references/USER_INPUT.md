@@ -25,7 +25,7 @@ Define the task. Collect missing information. Get the plan in place. Get the use
 or run in auto mode. Launch the execution agent. Then run an evaluation agent that makes sure
 the result is up to the spec. Then we notify the user of success.
 
-On the agentic side, see code/maxdokukin/dot_agents. Each per-directory `.fabr-space/.agents`
+On the agentic side, see code/maxdokukin/dot-agents. Each per-directory `.fabr-space/.agents`
 behaves as a directory-level agent knowledge point. There is also a `~/.fabr-space` at the
 root, which is special: it defines per-machine settings and procedures. Inside
 `~/.fabr-space/.agents` we keep the global agentic material and preferences. That is the
@@ -50,7 +50,7 @@ name.last, address.line_1, address.line_2, address.zip. Access can be granted to
 to part of a data type.
 
 Last note: the agent preferences have to be editable by the user, in a GUI. We have global
-rules, global preferences and per-project preferences. dot_agents does not fit precisely, but
+rules, global preferences and per-project preferences. dot-agents does not fit precisely, but
 well enough for the demo.
 
 ## 2. The learning layer and the monitoring view

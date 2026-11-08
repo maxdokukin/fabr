@@ -1,7 +1,7 @@
 # AGENTS.md
 
 This is **xewe 2.3**, the agentic workspace. Human documentation and the source of every
-global file: https://github.com/maxdokukin/dot_agents
+global file: https://github.com/maxdokukin/dot-agents
 
 Two roots. `./.agents/` is this project's folder; `~/.agents/` is the global install on this
 machine (may be absent, e.g. in a cloud session). Paths below say which one they mean.
